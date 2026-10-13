@@ -469,13 +469,81 @@ struct Ice40LseRamCePass : public Pass {
 			SigMap sigmap(module);
 			auto &bits = ram_bits[module->name];
 			std::vector<Cell*> todo;
+			// in a syn_hier="hard" module, a flip-flop with one load value made from at most
+			// two module inputs by plain logic (no flip-flop or RAM in between, so the hold
+			// mux fits a LUT4 with Q and the enable) gets no enable either; a second load
+			// value shows up as signals shared by D and the enable
+			bool hard = module->get_string_attribute(ID(syn_hier)) == "hard";
+			dict<SigBit, Cell*> gate_of;
+			pool<SigBit> inputs;
+			if (hard) {
+				for (auto c : module->cells())
+					if (c->type.begins_with("$_") && c->hasPort(ID::Y) && GetSize(c->getPort(ID::Y)) == 1)
+						gate_of[sigmap(c->getPort(ID::Y).as_bit())] = c;
+				for (auto w : module->wires())
+					if (w->port_input)
+						for (auto b : sigmap(SigSpec(w)))
+							inputs.insert(b);
+			}
+			// the leaves of a gate cone; false if it reaches anything but inputs and constants
+			auto leaves = [&](SigBit start, pool<SigBit> &out) {
+				std::vector<SigBit> stack = {sigmap(start)};
+				pool<SigBit> seen;
+				while (!stack.empty()) {
+					SigBit b = stack.back();
+					stack.pop_back();
+					if (!b.wire || seen.count(b))
+						continue;
+					seen.insert(b);
+					out.insert(b);
+					if (gate_of.count(b)) {
+						for (auto &conn : gate_of.at(b)->connections())
+							if (conn.first != ID::Y)
+								for (auto x : sigmap(conn.second))
+									stack.push_back(x);
+					} else if (!inputs.count(b))
+						return false;
+				}
+				return true;
+			};
+			// decided per register (Q wire and enable net), as LSE sees it: one flip-flop
+			// that needs the enable keeps it for all
+			typedef std::pair<Wire*, SigBit> RegKey;
+			dict<RegKey, std::vector<Cell*>> hard_group;
+			pool<RegKey> hard_keep;
 			for (auto cell : module->selected_cells()) {
 				if (!noen.count(cell->type))
 					continue;
 				SigBit db = sigmap(cell->getPort(ID::D)).as_bit();
-				if (bits.count(db) && used_internally(module, cell->getPort(ID::Q).as_bit()))
+				if (bits.count(db) && used_internally(module, cell->getPort(ID::Q).as_bit())) {
 					todo.push_back(cell);
+					continue;
+				}
+				if (!hard)
+					continue;
+				SigBit en = sigmap(cell->getPort(ID::E).as_bit());
+				RegKey key(cell->getPort(ID::Q).as_bit().wire, en);
+				hard_group[key].push_back(cell);
+				pool<SigBit> dl, el;
+				bool ok = leaves(db, dl);
+				// the hold mux must fit one LUT4 with Q and the enable
+				int nin = 0;
+				for (auto b : dl)
+					if (!gate_of.count(b))
+						nin++;
+				if (ok && nin <= 2) {
+					leaves(en, el);
+					for (auto b : dl)
+						if (el.count(b))
+							ok = false;
+				}
+				if (!ok || nin > 2)
+					hard_keep.insert(key);
 			}
+			for (auto &it : hard_group)
+				if (!hard_keep.count(it.first))
+					for (auto cell : it.second)
+						todo.push_back(cell);
 			for (auto cell : todo) {
 				SigBit q = cell->getPort(ID::Q).as_bit(), dd = cell->getPort(ID::D).as_bit(), e = cell->getPort(ID::E).as_bit();
 				SigBit nd = module->addWire(NEW_ID);
