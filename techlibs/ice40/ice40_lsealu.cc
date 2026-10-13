@@ -857,8 +857,10 @@ struct Ice40LseCmpPass : public Pass {
 	}
 
 	// a < b (or a <= b with or_equal), unsigned, rippled from bit 0
-	SigBit less(SigSpec a, SigSpec b, bool or_equal)
+	SigBit less(SigSpec a, SigSpec b, bool or_equal, bool plain = false)
 	{
+		if (plain)
+			return (or_equal ? module->Le(NEW_ID, a, b) : module->Lt(NEW_ID, a, b)).as_bit();
 		int n = GetSize(a);
 		bool init = or_equal;
 		SigBit c = lut({b[0], b[1], a[1], a[0]}, [init](const std::vector<bool> &v) {
@@ -888,35 +890,51 @@ struct Ice40LseCmpPass : public Pass {
 			// an operand that is a constant plus one or two signal bits is mostly
 			// constant: LSE simplifies those, leave them to ABC
 			// (followed through chains of adds, e.g. (524 + line_mode) - 3)
-			pool<SigBit> const_offset;
-			dict<SigBit, Cell*> add_of;
+			// an operand that depends on only one or two signal bits (a constant plus a
+			// bit or two, or a small case table) is mostly constant: LSE simplifies those,
+			// leave them to ABC (followed through combinational logic, e.g. (524 +
+			// line_mode) - 3)
+			dict<SigBit, Cell*> driver;
 			for (auto cell : module->cells())
-				if (cell->type.in(ID($add), ID($sub)))
-					for (auto bit : sigmap(cell->getPort(ID::Y)))
-						add_of[bit] = cell;
-			std::function<void(Cell*, pool<SigBit>&, pool<Cell*>&)> support = [&](Cell *c, pool<SigBit> &vars, pool<Cell*> &seen) {
-				if (seen.count(c) || GetSize(vars) > 2)
+				if (cell->type.begins_with("$") && !RTLIL::builtin_ff_cell_types().count(cell->type) &&
+						!cell->type.begins_with("$mem") && !cell->type.in(ID($eq), ID($ne), ID($lt), ID($le), ID($gt), ID($ge)))
+					for (auto &conn : cell->connections())
+						if (cell->output(conn.first))
+							for (auto bit : sigmap(conn.second))
+								driver[bit] = cell;
+			std::function<void(SigBit, pool<SigBit>&, pool<Cell*>&)> support = [&](SigBit bit, pool<SigBit> &vars, pool<Cell*> &seen) {
+				if (!bit.wire || GetSize(vars) > 2)
+					return;
+				if (!driver.count(bit)) {
+					vars.insert(bit);
+					return;
+				}
+				Cell *c = driver.at(bit);
+				if (seen.count(c))
 					return;
 				seen.insert(c);
-				for (auto port : {ID::A, ID::B})
-					for (auto bit : sigmap(c->getPort(port))) {
-						if (!bit.wire)
-							continue;
-						if (add_of.count(bit))
-							support(add_of.at(bit), vars, seen);
-						else
-							vars.insert(bit);
-					}
+				for (auto &conn : c->connections())
+					if (c->input(conn.first))
+						for (auto b : sigmap(conn.second))
+							support(b, vars, seen);
 			};
-			for (auto cell : module->cells())
-				if (cell->type.in(ID($add), ID($sub))) {
-					pool<SigBit> vars;
-					pool<Cell*> seen;
-					support(cell, vars, seen);
-					if (GetSize(vars) <= 2)
-						for (auto bit : sigmap(cell->getPort(ID::Y)))
-							const_offset.insert(bit);
-				}
+			auto few_vars = [&](const SigSpec &sig) {
+				pool<SigBit> vars;
+				pool<Cell*> seen;
+				for (auto bit : sig)
+					support(bit, vars, seen);
+				return GetSize(vars) <= 2;
+			};
+			// any bit from an add/sub of one or two signal bits counts too
+			auto offset_bit = [&](const SigSpec &sig) {
+				for (auto bit : sig)
+					if (driver.count(bit) && driver.at(bit)->type.in(ID($add), ID($sub))) {
+						Cell *c = driver.at(bit);
+						if (few_vars(SigSpec({sigmap(c->getPort(ID::A)), sigmap(c->getPort(ID::B))})))
+							return true;
+					}
+				return false;
+			};
 			int count = 0;
 			for (auto cell : todo) {
 				bool is_signed = cell->getParam(ID::A_SIGNED).as_bool() && cell->getParam(ID::B_SIGNED).as_bool();
@@ -938,11 +956,11 @@ struct Ice40LseCmpPass : public Pass {
 				};
 				if (w < 3 || other_const(ac) || other_const(bc) || lead0(ac) > w - 2 || lead0(bc) > w - 2)
 					continue;
-				bool offset = false;
-				for (auto bit : a) if (const_offset.count(bit)) offset = true;
-				for (auto bit : b) if (const_offset.count(bit)) offset = true;
-				if (offset)
+				if (offset_bit(a) || offset_bit(b) || (eq && (few_vars(a) || few_vars(b))))
 					continue;
+				// against a nearly constant operand only the high-bit override is built
+				// here, the rest is left to ABC
+				bool plain = !eq && (few_vars(a) || few_vars(b));
 				a.extend_u0(w, is_signed);
 				b.extend_u0(w, is_signed);
 				SigBit r;
@@ -962,13 +980,15 @@ struct Ice40LseCmpPass : public Pass {
 					while (kx < w - 2 && x[w-1-kx] == State::S0 && y[w-1-kx].wire) kx++;
 					if (k > 0) {
 						SigBit hi = module->ReduceOr(NEW_ID, x.extract(w - k, k));
-						SigBit lo = less(x.extract(0, w - k), y.extract(0, w - k), or_equal);
+						SigBit lo = less(x.extract(0, w - k), y.extract(0, w - k), or_equal, plain);
 						r = module->Mux(NEW_ID, lo, State::S0, hi).as_bit();
 					} else if (kx > 0) {
 						SigBit hi = module->ReduceOr(NEW_ID, y.extract(w - kx, kx));
-						SigBit lo = less(x.extract(0, w - kx), y.extract(0, w - kx), or_equal);
+						SigBit lo = less(x.extract(0, w - kx), y.extract(0, w - kx), or_equal, plain);
 						r = module->Mux(NEW_ID, lo, State::S1, hi).as_bit();
-					} else
+					} else if (plain)
+						continue;
+					else
 						r = less(x, y, or_equal);
 				}
 				SigSpec y = cell->getPort(ID::Y);
