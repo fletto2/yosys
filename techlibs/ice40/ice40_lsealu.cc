@@ -732,6 +732,13 @@ struct Ice40LsePolarityPass : public Pass {
 				for (auto b : sigmap(conn.second))
 					other_users.insert(b);
 			auto init_of = [](Cell *c) { Const v = c->getParam(ID(LUT_INIT)); v.extu(16); return v; };
+			// the sum LUT of a carry chain keeps its polarity (LSE never inverts an adder's sum)
+			pool<SigBit> carry_nets;
+			for (auto cell : module->cells())
+				if (cell->type == ID(SB_CARRY))
+					for (auto port : {ID(CI), ID(CO)})
+						for (auto bb : sigmap(cell->getPort(port)))
+							if (bb.wire) carry_nets.insert(bb);
 			int count = 0;
 			for (int pass = 0; pass < 4; pass++) {
 				int flips = 0;
@@ -740,6 +747,8 @@ struct Ice40LsePolarityPass : public Pass {
 						continue;
 					SigBit o = sigmap(cell->getPort(ID::O).as_bit());
 					if (other_users.count(o) || !lut_users.count(o))
+						continue;
+					if (carry_nets.count(sigmap(cell->getPort(ID(I3)).as_bit())))
 						continue;
 					Const init = init_of(cell), ninit = init;
 					for (int i = 0; i < 16; i++)
