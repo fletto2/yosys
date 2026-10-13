@@ -221,8 +221,9 @@ struct MemoryDffWorker
 	FfInitVals initvals;
 	FfMergeHelper merger;
 	bool flag_no_rw_check;
+	bool flag_lse;
 
-	MemoryDffWorker(Module *module, bool flag_no_rw_check) : module(module), modwalker(module->design), flag_no_rw_check(flag_no_rw_check)
+	MemoryDffWorker(Module *module, bool flag_no_rw_check, bool flag_lse) : module(module), modwalker(module->design), flag_no_rw_check(flag_no_rw_check), flag_lse(flag_lse)
 	{
 		modwalker.setup(module);
 		initvals.set(&modwalker.sigmap, module);
@@ -355,6 +356,12 @@ struct MemoryDffWorker
 		if (ff.has_sr) {
 			// Latches and FFs with SR are not supported.
 			log("output FF has both set and reset, not supported.\n");
+			return;
+		}
+		if (flag_lse && ff.has_srst) {
+			// LSE keeps such a register in the fabric and takes the address register
+			// into the RAM instead
+			log("output FF has a sync reset, left for the address FF (LSE).\n");
 			return;
 		}
 
@@ -578,7 +585,7 @@ struct MemoryDffWorker
 		// value of the FF is fully-defined.  However, we
 		// cannot simply reject FFs with any defined init bit,
 		// as this is often the result of merging a const bit.
-		if (ff.val_init.is_fully_def()) {
+		if (ff.val_init.is_fully_def() && !flag_lse) {
 			log("address FF has fully-defined init value, not supported.\n");
 			return;
 		}
@@ -629,7 +636,7 @@ struct MemoryDffPass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    memory_dff [-no-rw-check] [selection]\n");
+		log("    memory_dff [-no-rw-check] [-lse] [selection]\n");
 		log("\n");
 		log("This pass detects DFFs at memory read ports and merges them into the memory\n");
 		log("port. I.e. it consumes an asynchronous memory port and the flip-flops at its\n");
@@ -640,10 +647,15 @@ struct MemoryDffPass : public Pass {
 		log("        read/write collision\" (same result as setting the no_rw_check\n");
 		log("        attribute on all memories).\n");
 		log("\n");
+		log("    -lse\n");
+		log("        as Lattice LSE: leave an output FF with a synchronous reset in the\n");
+		log("        fabric (the address FF is merged instead), and merge an address FF\n");
+		log("        even when it has an initial value.\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
-		bool flag_no_rw_check = false;
+		bool flag_no_rw_check = false, flag_lse = false;
 		log_header(design, "Executing MEMORY_DFF pass (merging $dff cells to $memrd).\n");
 
 		size_t argidx;
@@ -652,12 +664,16 @@ struct MemoryDffPass : public Pass {
 				flag_no_rw_check = true;
 				continue;
 			}
+			if (args[argidx] == "-lse") {
+				flag_lse = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
 		for (auto mod : design->selected_modules()) {
-			MemoryDffWorker worker(mod, flag_no_rw_check);
+			MemoryDffWorker worker(mod, flag_no_rw_check, flag_lse);
 			worker.run();
 		}
 	}

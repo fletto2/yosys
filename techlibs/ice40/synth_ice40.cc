@@ -312,8 +312,10 @@ struct SynthIce40Pass : public ScriptPass
 			run("techmap -map +/cmp2lut.v -D LUT_WIDTH=4");
 			run("opt_expr");
 			run("opt_clean");
+			// LSE takes the read address register into the RAM rather than a data
+			// register with a reset; also reserves memory port registers before ice40_dsp
+			run("memory_dff -lse" + no_rw_check_opt);
 			if (help_mode || dsp) {
-				run("memory_dff" + no_rw_check_opt); // ice40_dsp will merge registers, reserve memory port registers first
 				run("wreduce t:$mul");
 				run("techmap -map +/mul2dsp.v -map +/ice40/dsp_map.v -D DSP_A_MAXWIDTH=16 -D DSP_B_MAXWIDTH=16 "
 						"-D DSP_A_MINWIDTH=2 -D DSP_B_MINWIDTH=2 -D DSP_Y_MINWIDTH=11 "

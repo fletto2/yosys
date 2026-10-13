@@ -124,11 +124,23 @@ struct Ice40LseAddEnablePass : public Pass {
 					pmux_of_y[sigmap(cell->getPort(ID::Y))] = cell;
 			dict<SigSpec, SigSpec> ff_q_of_d;
 			pool<SigSpec> behind_const;
+			// registers that address a memory: LSE folds their enable (and reset) into logic
+			pool<SigBit> mem_addr;
+			for (auto cell : module->cells())
+				if (cell->type.in(ID($memrd), ID($memrd_v2), ID($memwr), ID($memwr_v2)))
+					for (auto bit : sigmap(cell->getPort(ID::ADDR)))
+						mem_addr.insert(bit);
 
 			for (auto cell : module->cells())
 				if (cell->type.in(ID($dff), ID($adff), ID($dffe), ID($adffe))) {
 					SigSpec d = sigmap(cell->getPort(ID::D)), q = sigmap(cell->getPort(ID::Q));
 					ff_q_of_d[d] = q;
+					bool addr = false;
+					for (auto bit : q)
+						if (mem_addr.count(bit))
+							addr = true;
+					if (addr)
+						behind_const.insert(d);
 					for (int depth = 0; depth < 4 && mux_of_y.count(d); depth++) {
 						Cell *m = mux_of_y.at(d);
 						SigSpec ma = sigmap(m->getPort(ID::A)), mb = sigmap(m->getPort(ID::B));
@@ -136,8 +148,8 @@ struct Ice40LseAddEnablePass : public Pass {
 						else if (mb.is_fully_const()) d = ma;
 						else break;
 						ff_q_of_d[d] = q;
-						if (cell->type.in(ID($adff), ID($adffe)))
-							behind_const.insert(d);
+						// a counter with a sync or async clear keeps its enable
+						behind_const.insert(d);
 					}
 					// with an async reset, LSE also keeps the enable when the add is one of
 					// several next-state choices (a clear or a load in front of it)
@@ -404,6 +416,54 @@ struct Ice40LseRamCePass : public Pass {
 				cell->type = noen.at(cell->type);
 			}
 			log("%s: %d flip-flops lose their enable.\n", log_id(module), GetSize(todo));
+
+			// a register that addresses a RAM gets neither a clock enable nor a synchronous
+			// reset/set pin: LSE builds both into the logic in front of it
+			pool<SigBit> addr_bits;
+			for (auto cell : module->cells())
+				if (is_ram(cell))
+					for (auto port : {ID(RADDR), ID(WADDR), ID(ADDRESS)})
+						if (cell->hasPort(port))
+							for (auto b : sigmap(cell->getPort(port)))
+								addr_bits.insert(b);
+			int nsr = 0;
+			std::vector<Cell*> srs;
+			dict<SigBit, Cell*> or_of;
+			for (auto c : module->cells())
+				if (c->type == ID($_OR_))
+					or_of[sigmap(c->getPort(ID::Y).as_bit())] = c;
+			for (auto cell : module->selected_cells())
+				if (cell->type.in(ID(SB_DFFE), ID(SB_DFFSR), ID(SB_DFFSS), ID(SB_DFFESR), ID(SB_DFFESS)) &&
+						addr_bits.count(sigmap(cell->getPort(ID::Q).as_bit())))
+					srs.push_back(cell);
+			for (auto cell : srs) {
+				bool set = cell->type.in(ID(SB_DFFSS), ID(SB_DFFESS)), sync = cell->type != ID(SB_DFFE);
+				SigBit q = cell->getPort(ID::Q).as_bit(), nd = cell->getPort(ID::D).as_bit();
+				SigBit r = sync ? cell->getPort(set ? ID::S : ID::R).as_bit() : SigBit();
+				if (cell->hasPort(ID::E)) {
+					// a reset that wins over the enable shows up as E = en | R; build
+					// R ? 0 : (en ? D : Q) as the RTL says, not with the merged enable
+					SigBit e = cell->getPort(ID::E).as_bit(), en = e;
+					if (sync && or_of.count(sigmap(e))) {
+						Cell *g = or_of.at(sigmap(e));
+						SigBit ga = sigmap(g->getPort(ID::A).as_bit()), gb = sigmap(g->getPort(ID::B).as_bit());
+						if (ga == sigmap(r)) en = g->getPort(ID::B).as_bit();
+						else if (gb == sigmap(r)) en = g->getPort(ID::A).as_bit();
+					}
+					nd = module->MuxGate(NEW_ID, q, nd, en);
+				}
+				if (sync) {
+					nd = set ? module->OrGate(NEW_ID, nd, r) : module->AndnotGate(NEW_ID, nd, r);
+					cell->unsetPort(set ? ID::S : ID::R);
+				}
+				if (cell->hasPort(ID::E))
+					cell->unsetPort(ID::E);
+				cell->setPort(ID::D, nd);
+				cell->type = ID(SB_DFF);
+				nsr++;
+			}
+			if (nsr)
+				log("%s: %d RAM address flip-flops lose their enable/synchronous reset.\n", log_id(module), nsr);
 		}
 	}
 } Ice40LseRamCePass;
@@ -741,15 +801,38 @@ struct Ice40LseCmpPass : public Pass {
 			for (auto cell : module->selected_cells())
 				if (cell->type.in(ID($eq), ID($ne), ID($lt), ID($le), ID($gt), ID($ge)))
 					todo.push_back(cell);
-			// an operand that is a constant plus a small signal is mostly constant: LSE
-			// simplifies those, leave them to ABC
+			// an operand that is a constant plus one or two signal bits is mostly
+			// constant: LSE simplifies those, leave them to ABC
+			// (followed through chains of adds, e.g. (524 + line_mode) - 3)
 			pool<SigBit> const_offset;
+			dict<SigBit, Cell*> add_of;
 			for (auto cell : module->cells())
-				if (cell->type.in(ID($add), ID($sub)) &&
-						(cell->getPort(ID::A).is_fully_const() || cell->getPort(ID::B).is_fully_const() ||
-						 GetSize(sigmap(cell->getPort(ID::A)).to_sigbit_pool()) <= 2 || GetSize(sigmap(cell->getPort(ID::B)).to_sigbit_pool()) <= 2))
+				if (cell->type.in(ID($add), ID($sub)))
 					for (auto bit : sigmap(cell->getPort(ID::Y)))
-						const_offset.insert(bit);
+						add_of[bit] = cell;
+			std::function<void(Cell*, pool<SigBit>&, pool<Cell*>&)> support = [&](Cell *c, pool<SigBit> &vars, pool<Cell*> &seen) {
+				if (seen.count(c) || GetSize(vars) > 2)
+					return;
+				seen.insert(c);
+				for (auto port : {ID::A, ID::B})
+					for (auto bit : sigmap(c->getPort(port))) {
+						if (!bit.wire)
+							continue;
+						if (add_of.count(bit))
+							support(add_of.at(bit), vars, seen);
+						else
+							vars.insert(bit);
+					}
+			};
+			for (auto cell : module->cells())
+				if (cell->type.in(ID($add), ID($sub))) {
+					pool<SigBit> vars;
+					pool<Cell*> seen;
+					support(cell, vars, seen);
+					if (GetSize(vars) <= 2)
+						for (auto bit : sigmap(cell->getPort(ID::Y)))
+							const_offset.insert(bit);
+				}
 			int count = 0;
 			for (auto cell : todo) {
 				bool is_signed = cell->getParam(ID::A_SIGNED).as_bool() && cell->getParam(ID::B_SIGNED).as_bool();
