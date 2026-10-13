@@ -22,16 +22,27 @@ input [PORT_W_WIDTH-1:0] PORT_W_WR_DATA;
 wire [15:0] RDATA;
 wire [15:0] WDATA;
 wire [15:0] MASK;
-wire [10:0] RADDR = {PORT_R_ADDR[0], PORT_R_ADDR[1], PORT_R_ADDR[2], PORT_R_ADDR[10:3]};
-wire [10:0] WADDR = {PORT_W_ADDR[0], PORT_W_ADDR[1], PORT_W_ADDR[2], PORT_W_ADDR[10:3]};
-
-// LSE wires a 16-bit wide RAM straight through; the bit-reversed order below lets
-// mixed widths share one INIT layout, which 16/16 doesn't need
+// LSE wires a RAM whose ports have the same width straight through: the address
+// goes to RADDR/WADDR as is and data bit b to the pin that mode uses for it
+// (DPIN). The bit-reversed order of the generic mapping lets mixed widths share
+// one INIT layout, which LSE does not do.
 `ifdef LSE
-localparam DIRECT = PORT_R_WIDTH == 16 && PORT_W_WIDTH == 16;
+localparam DIRECT = PORT_R_WIDTH == PORT_W_WIDTH;
 `else
 localparam DIRECT = 0;
 `endif
+localparam W = PORT_R_WIDTH;
+localparam G = 16 / W;                  // bits of one 16-bit word that share a data pin
+localparam SH = W == 16 ? 3 : W == 8 ? 2 : W == 4 ? 1 : 0;
+
+// the pin carrying data bit b in read/write mode for width W (iCE40 SB_RAM40_4K)
+function integer DPIN;
+	input integer b;
+	DPIN = W == 16 ? b : W == 8 ? 2*b : W == 4 ? 4*b + 1 : 8*b + 3;
+endfunction
+
+wire [10:0] RADDR = DIRECT ? PORT_R_ADDR >> SH : {PORT_R_ADDR[0], PORT_R_ADDR[1], PORT_R_ADDR[2], PORT_R_ADDR[10:3]};
+wire [10:0] WADDR = DIRECT ? PORT_W_ADDR >> SH : {PORT_W_ADDR[0], PORT_W_ADDR[1], PORT_W_ADDR[2], PORT_W_ADDR[10:3]};
 
 function [1:0] mode;
 	input integer width;
@@ -50,7 +61,12 @@ function [255:0] slice_init;
 	reg [11:0] a;
 	for (i = 0; i < 256; i = i + 1) begin
 		ri = i;
-		a = DIRECT ? {idx, ri} : {idx, ri[7:4], ri[0], ri[1], ri[2], ri[3]};
+		if (DIRECT) begin
+			// physical bit: word {idx, ri[7:4]}, pin ri[3:0]; pin group g holds data
+			// bit ri[3:0]/G of logical word (ri[3:0]%G)*256 + {idx, ri[7:4]}
+			a = (((ri[3:0] % G) * 256 + {idx, ri[7:4]}) * W) + ri[3:0] / G;
+		end else
+			a = {idx, ri[7:4], ri[0], ri[1], ri[2], ri[3]};
 		slice_init[i] = INIT[a];
 	end
 endfunction
@@ -91,6 +107,15 @@ endfunction
 
 generate
 
+if (DIRECT) begin
+	genvar b;
+	for (b = 0; b < W; b = b + 1) begin:dpin
+		assign PORT_R_RD_DATA[b] = RDATA[DPIN(b)];
+		assign WDATA[DPIN(b)] = PORT_W_WR_DATA[b];
+		if (W == 16)
+			assign MASK[b] = !PORT_W_WR_BE[b];
+	end
+end else begin
 case(PORT_R_WIDTH)
 	2: begin
 		assign PORT_R_RD_DATA = {
@@ -119,9 +144,6 @@ case(PORT_R_WIDTH)
 		};
 	end
 	16: begin
-		if (DIRECT)
-			assign PORT_R_RD_DATA = RDATA;
-		else
 			assign PORT_R_RD_DATA = {
 				RDATA[15],
 				RDATA[7],
@@ -171,10 +193,7 @@ case(PORT_W_WIDTH)
 		} = PORT_W_WR_DATA;
 	end
 	16: begin
-		if (DIRECT) begin
-			assign WDATA = PORT_W_WR_DATA;
-			assign MASK = ~PORT_W_WR_BE;
-		end else begin
+		begin
 			assign WDATA = {
 				PORT_W_WR_DATA[15],
 				PORT_W_WR_DATA[7],
@@ -214,6 +233,8 @@ case(PORT_W_WIDTH)
 		end
 	end
 endcase
+
+end
 
 if (PORT_R_CLK_POL) begin
 	if (PORT_W_CLK_POL) begin
