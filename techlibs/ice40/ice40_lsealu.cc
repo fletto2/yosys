@@ -1041,4 +1041,152 @@ struct Ice40LseMuxChainPass : public Pass {
 	}
 } Ice40LseMuxChainPass;
 
+struct Ice40LseMuxSelPass : public Pass {
+	Ice40LseMuxSelPass() : Pass("ice40_lsemuxsel", "split a shared mux select into the muxes, as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsemuxsel [selection]\n");
+		log("\n");
+		log("When an SB_LUT4 S with three or four inputs is only the select of several 2:1\n");
+		log("multiplexer LUTs and S = x op R for one of its inputs x (op an AND or OR, with\n");
+		log("either polarity), LSE builds R as the shared LUT and puts the gate with x into\n");
+		log("every multiplexer LUT. This pass does the same; the LUT count is unchanged.\n");
+		log("An x driven by a flip-flop is preferred.\n");
+		log("\n");
+	}
+	static bool bit(int init, int idx) { return (init >> idx) & 1; }
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEMUXSEL pass.\n");
+		IdString pins[4] = {ID(I0), ID(I1), ID(I2), ID(I3)};
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, std::vector<std::pair<Cell*, IdString>>> users;
+			dict<SigBit, Cell*> driver;
+			pool<SigBit> port_bits;
+			for (auto w : module->wires())
+				if (w->port_output)
+					for (auto b : sigmap(w)) port_bits.insert(b);
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections()) {
+					for (auto b : sigmap(conn.second)) {
+						if (!b.wire) continue;
+						if (cell->output(conn.first)) driver[b] = cell;
+						else users[b].push_back({cell, conn.first});
+					}
+				}
+			auto init_of = [](Cell *c) { return c->getParam(ID(LUT_INIT)).as_int() & 0xffff; };
+			// pin index of the select if the LUT is a 2:1 mux on three live inputs
+			auto mux_select = [&](Cell *c, int &sel, int &lo, int &hi) {
+				int init = init_of(c);
+				std::vector<int> live;
+				int mask = 0;
+				for (int i = 0; i < 4; i++) {
+					SigBit pb = sigmap(c->getPort(pins[i])).as_bit();
+					if (pb.wire) { live.push_back(i); mask |= 1 << i; }
+					else if (pb.data != State::S0) return false;
+				}
+				if (GetSize(live) != 3) return false;
+				for (int si = 0; si < 3; si++) {
+					int s = live[si], a = live[(si+1)%3], b = live[(si+2)%3];
+					for (int swap = 0; swap < 2; swap++) {
+						int x0 = swap ? b : a, x1 = swap ? a : b;
+						bool ok = true;
+						for (int idx = 0; idx < 16 && ok; idx++) {
+							if (idx & ~mask) continue;   // unused inputs are tied to 0
+							bool want = ((idx >> s) & 1) ? ((idx >> x1) & 1) : ((idx >> x0) & 1);
+							if (bit(init, idx) != want) ok = false;
+						}
+						if (ok) { sel = s; lo = x0; hi = x1; return true; }
+					}
+				}
+				return false;
+			};
+			int count = 0;
+			std::vector<Cell*> luts;
+			for (auto cell : module->selected_cells())
+				if (cell->type == ID(SB_LUT4) && !cell->get_bool_attribute(ID(lse_fixed)))
+					luts.push_back(cell);
+			for (auto S : luts) {
+				SigBit so = sigmap(S->getPort(ID::O).as_bit());
+				if (port_bits.count(so) || !users.count(so))
+					continue;
+				std::vector<std::tuple<Cell*, int, int, int>> muxes;
+				bool only_selects = true;
+				for (auto &u : users.at(so)) {
+					int sel, lo, hi;
+					if (u.first->type != ID(SB_LUT4) || u.first == S || !mux_select(u.first, sel, lo, hi) ||
+							u.second != pins[sel]) { only_selects = false; break; }
+					muxes.push_back(std::make_tuple(u.first, sel, lo, hi));
+				}
+				if (!only_selects || GetSize(muxes) < 2)
+					continue;
+				std::vector<int> live;
+				int smask = 0;
+				bool tied1 = false;
+				for (int i = 0; i < 4; i++) {
+					SigBit pb = sigmap(S->getPort(pins[i])).as_bit();
+					if (pb.wire) { live.push_back(i); smask |= 1 << i; }
+					else if (pb.data != State::S0) tied1 = true;
+				}
+				if (GetSize(live) < 3 || tied1)
+					continue;
+				int sinit = init_of(S);
+				// find x and op with S = op(x ^ px, R)
+				int best_x = -1, best_op = -1, best_px = 0, best_score = -1;
+				for (int x : live)
+					for (int op = 0; op < 2; op++)        // 0: AND, 1: OR
+						for (int px = 0; px < 2; px++) {
+							// with x at the "dominating" value the output is constant
+							int dom = op == 0 ? px : !px;  // x value that forces the result
+							bool ok = true;
+							for (int idx = 0; idx < 16 && ok; idx++)
+								if (!(idx & ~smask) && ((idx >> x) & 1) == dom && bit(sinit, idx) != (op == 1))
+									ok = false;
+							if (!ok) continue;
+							Cell *d = driver.count(sigmap(S->getPort(pins[x]).as_bit())) ? driver.at(sigmap(S->getPort(pins[x]).as_bit())) : nullptr;
+							int score = (d && d->type.begins_with("\\SB_DFF")) ? 2 : 1;
+							if (score > best_score) { best_score = score; best_x = x; best_op = op; best_px = px; }
+						}
+				if (best_x < 0)
+					continue;
+				// R: S with x at its non-dominating value
+				int nd = best_op == 0 ? !best_px : best_px;
+				SigBit xsig = S->getPort(pins[best_x]).as_bit();
+				Const rinit(State::S0, 16);
+				for (int idx = 0; idx < 16; idx++) {
+					// R ignores the x pin (now tied to 0) and the unused pins
+					int j = ((idx & smask) & ~(1 << best_x)) | (nd << best_x);
+					rinit.set(idx, bit(sinit, j) ? State::S1 : State::S0);
+				}
+				S->setParam(ID(LUT_INIT), rinit);
+				S->setPort(pins[best_x], State::S0);
+				// each mux: inputs lo, hi, x, R -> g(x, R) ? hi : lo
+				for (auto &m : muxes) {
+					Cell *M = std::get<0>(m);
+					int sel = std::get<1>(m), lo = std::get<2>(m), hi = std::get<3>(m);
+					int free = -1;
+					for (int i = 0; i < 4; i++)
+						if (i != sel && i != lo && i != hi) free = i;
+					M->setPort(pins[free], xsig);
+					Const ninit(State::S0, 16);
+					for (int idx = 0; idx < 16; idx++) {
+						int xv = (idx >> free) & 1, rv = (idx >> sel) & 1;
+						int xe = xv ^ best_px;
+						int g = best_op == 0 ? (xe & rv) : (xe | rv);
+						int v = g ? ((idx >> hi) & 1) : ((idx >> lo) & 1);
+						ninit.set(idx, v ? State::S1 : State::S0);
+					}
+					M->setParam(ID(LUT_INIT), ninit);
+				}
+				count++;
+			}
+			log("%s: %d shared selects split into their multiplexers.\n", log_id(module), count);
+		}
+	}
+} Ice40LseMuxSelPass;
+
 PRIVATE_NAMESPACE_END
