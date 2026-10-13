@@ -104,7 +104,10 @@ struct Ice40LseAddEnablePass : public Pass {
 	{
 		extra_args(args, 1, design);
 		log_header(design, "Executing ICE40_LSEADDENABLE pass.\n");
-		for (auto module : design->selected_modules()) {
+		for (auto module : design->selected_modules())
+		for (int round = 0, count = 1; round < 4 && count > 0; round++) {
+			// repeated: once `if (en) q <= q + k' is folded, an outer condition (a case
+			// arm, another if) around it is folded too, as LSE does
 			SigMap sigmap(module);
 			dict<SigBit, std::pair<Cell*, int>> add_out;      // bit -> (add/sub cell, index in Y)
 			for (auto cell : module->cells())
@@ -152,7 +155,7 @@ struct Ice40LseAddEnablePass : public Pass {
 						behind_const.insert(d);
 					}
 					// with an async reset, LSE also keeps the enable when the add is one of
-					// several next-state choices (a clear or a load in front of it)
+					// several next-state choices (a load in front of it)
 					if (!cell->type.in(ID($adff), ID($adffe)))
 						continue;
 					std::vector<SigSpec> todo = {sigmap(cell->getPort(ID::D))};
@@ -175,14 +178,17 @@ struct Ice40LseAddEnablePass : public Pass {
 								load = true;
 						for (auto &in : ins)
 							if (mux_of_y.count(in) || pmux_of_y.count(in)) {
-								if (load || m->type == ID($pmux))
+								if (load)
 									behind_const.insert(in);
 								todo.push_back(in);
 							}
 					}
 				}
-			int count = 0;
+			count = 0;
+			std::vector<Cell*> pmuxes;
 			for (auto mux : module->selected_cells()) {
+				if (mux->type == ID($pmux))
+					pmuxes.push_back(mux);
 				if (mux->type != ID($mux))
 					continue;
 				SigSpec my = sigmap(mux->getPort(ID::Y));
@@ -218,8 +224,8 @@ struct Ice40LseAddEnablePass : public Pass {
 					else continue;
 					SigSpec k = add->getPort(kport);
 					// measured: LSE keeps the enable when a constant step has exactly one
-					// trailing zero (2, 6, 10, 14, ...) and folds it for every other step
-					if (k.is_fully_const() && GetSize(k) >= 2 && k[0] == State::S0 && k[1] == State::S1)
+					// trailing zero (2, 6, 10, 14, ...)
+					if (sigmap(k).is_fully_const() && GetSize(k) >= 2 && k[0] == State::S0 && k[1] == State::S1)
 						continue;
 					SigSpec gated = side ? module->Mux(NEW_ID, k, SigSpec(State::S0, GetSize(k)), mux->getPort(ID::S))
 							: module->Mux(NEW_ID, SigSpec(State::S0, GetSize(k)), k, mux->getPort(ID::S));
@@ -231,6 +237,69 @@ struct Ice40LseAddEnablePass : public Pass {
 					nadd->setPort(ID::Y, ny);
 					module->connect(mux->getPort(ID::Y), SigSpec(ny).extract(0, GetSize(sum)));
 					mux->setPort(ID::Y, module->addWire(NEW_ID, GetSize(sum)));
+					count++;
+					break;
+				}
+			}
+			// a case arm: default Q, one arm Q + K  ->  default Q + (arm ? K : 0)
+			for (auto pm : pmuxes) {
+				SigSpec py = sigmap(pm->getPort(ID::Y));
+				if (behind_const.count(py))
+					continue;
+				SigSpec q = sigmap(pm->getPort(ID::A));
+				if (ff_q_of_d.count(py) && q != ff_q_of_d.at(py))
+					continue;
+				SigSpec pb = pm->getPort(ID::B), ps = pm->getPort(ID::S);
+				int w = GetSize(q), n = GetSize(ps);
+				for (int i = 0; i < n; i++) {
+					SigSpec sum = sigmap(pb.extract(i * w, w));
+					if (!add_out.count(sum[0]))
+						continue;
+					Cell *add = add_out.at(sum[0]).first;
+					SigSpec y = sigmap(add->getPort(ID::Y));
+					if (GetSize(sum) > GetSize(y) || y.extract(0, GetSize(sum)) != sum)
+						continue;
+					SigSpec opA = sigmap(add->getPort(ID::A)), opB = sigmap(add->getPort(ID::B));
+					auto same = [&](const SigSpec &op) {
+						int m = std::min(GetSize(op), GetSize(q));
+						if (op.extract(0, m) != q.extract(0, m))
+							return false;
+						for (int j = m; j < GetSize(op); j++)
+							if (op[j] != State::S0) return false;
+						return m == GetSize(q);
+					};
+					IdString kport;
+					if (same(opA)) kport = ID::B;
+					else if (same(opB) && add->type == ID($add)) kport = ID::A;
+					else continue;
+					SigSpec k = add->getPort(kport);
+					if (sigmap(k).is_fully_const() && GetSize(k) >= 2 && k[0] == State::S0 && k[1] == State::S1)
+						continue;
+					SigSpec gated = module->Mux(NEW_ID, SigSpec(State::S0, GetSize(k)), k, ps[i]);
+					Cell *nadd = module->addCell(NEW_ID, add->type);
+					nadd->parameters = add->parameters;
+					nadd->setPort(ID::A, kport == ID::B ? add->getPort(ID::A) : gated);
+					nadd->setPort(ID::B, kport == ID::B ? gated : add->getPort(ID::B));
+					Wire *ny = module->addWire(NEW_ID, GetSize(y));
+					nadd->setPort(ID::Y, ny);
+					SigSpec nb, ns;
+					for (int j = 0; j < n; j++)
+						if (j != i) {
+							nb.append(pb.extract(j * w, w));
+							ns.append(ps[j]);
+						}
+					pm->setPort(ID::A, SigSpec(ny).extract(0, w));
+					if (GetSize(ns) == 0) {
+						module->connect(pm->getPort(ID::Y), SigSpec(ny).extract(0, w));
+						pm->setPort(ID::Y, module->addWire(NEW_ID, w));
+						pm->setPort(ID::B, SigSpec(State::Sx, w));
+						pm->setPort(ID::S, State::S0);
+						pm->setParam(ID::S_WIDTH, 1);
+					} else {
+						pm->setPort(ID::B, nb);
+						pm->setPort(ID::S, ns);
+						pm->setParam(ID::S_WIDTH, GetSize(ns));
+					}
 					count++;
 					break;
 				}
@@ -868,5 +937,108 @@ struct Ice40LseCmpPass : public Pass {
 		}
 	}
 } Ice40LseCmpPass;
+
+struct Ice40LseMuxChainPass : public Pass {
+	Ice40LseMuxChainPass() : Pass("ice40_lsemuxchain", "build priority mux chains as 4:1 muxes, as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsemuxchain [selection]\n");
+		log("\n");
+		log("LSE builds a priority chain  s0 ? a0 : s1 ? a1 : s2 ? a2 : a3  that several bits\n");
+		log("share (an if/else-if on a bus) as a 4:1 multiplexer with encoded selects\n");
+		log("T = !(s0 | s1) and S = T ? !s2 : !s0. This pass rewrites such $_MUX_ chains\n");
+		log("into $_MUX4_ cells, for the LSE 4:1 mapping in two LUT4s.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEMUXCHAIN pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, Cell*> mux_of;
+			dict<SigBit, int> fanout;
+			for (auto cell : module->cells()) {
+				if (cell->type == ID($_MUX_))
+					mux_of[sigmap(cell->getPort(ID::Y).as_bit())] = cell;
+				for (auto &conn : cell->connections())
+					if (!cell->output(conn.first))
+						for (auto b : sigmap(conn.second))
+							fanout[b]++;
+			}
+			for (auto w : module->wires())
+				if (w->port_output)
+					for (auto b : sigmap(w))
+						fanout[b]++;
+			// root mux -> (m1, m2) with each next link single-fanout on the A side
+			struct Chain { Cell *m0, *m1, *m2; IdString n0, n1, n2; };
+			dict<std::tuple<SigBit, SigBit, SigBit>, std::vector<Chain>> groups;
+			pool<Cell*> inner;
+			for (auto cell : module->selected_cells()) {
+				if (cell->type != ID($_MUX_))
+					continue;
+				SigBit a = sigmap(cell->getPort(ID::A).as_bit());
+				if (!mux_of.count(a) || fanout[a] != 1)
+					continue;
+				Cell *m1 = mux_of.at(a);
+				SigBit a1 = sigmap(m1->getPort(ID::A).as_bit());
+				if (!mux_of.count(a1) || fanout[a1] != 1)
+					continue;
+				Cell *m2 = mux_of.at(a1);
+				inner.insert(m1);
+				inner.insert(m2);
+				// exactly three levels: a longer chain LSE builds differently
+				if (mux_of.count(sigmap(m2->getPort(ID::A).as_bit())))
+					continue;
+				groups[std::make_tuple(sigmap(cell->getPort(ID::S).as_bit()), sigmap(m1->getPort(ID::S).as_bit()),
+						sigmap(m2->getPort(ID::S).as_bit()))].push_back({cell, m1, m2, cell->name, m1->name, m2->name});
+			}
+			int count = 0;
+			pool<Cell*> used;
+			for (auto &g : groups) {
+				std::vector<Chain> chains;
+				for (auto &c : g.second)
+					// only the outermost three of a longer chain, each mux in one chain
+					if (!inner.count(c.m0) && !used.count(c.m0) && !used.count(c.m1) && !used.count(c.m2) &&
+							c.m0 != c.m1 && c.m1 != c.m2 && c.m0 != c.m2) {
+						chains.push_back(c);
+						used.insert(c.m0);
+						used.insert(c.m1);
+						used.insert(c.m2);
+					}
+				if (GetSize(chains) < 2)
+					continue;
+				SigBit s0 = std::get<0>(g.first), s1 = std::get<1>(g.first), s2 = std::get<2>(g.first);
+				// selects that are bits of one index (a decoded $bmux/$shiftx) make a
+				// binary tree, not a priority chain
+				if ((s0.wire && (s0.wire == s1.wire || s0.wire == s2.wire)) || (s1.wire && s1.wire == s2.wire))
+					continue;
+				log("  %d bits like %s, selects %s %s %s\n", GetSize(chains), log_signal(chains[0].m0->getPort(ID::Y)),
+						log_signal(s0), log_signal(s1), log_signal(s2));
+				SigBit t = module->NorGate(NEW_ID, s0, s1);
+				SigBit sel = module->MuxGate(NEW_ID, module->NotGate(NEW_ID, s0), module->NotGate(NEW_ID, s2), t);
+				for (auto &c : chains) {
+					if (!module->cell(c.n0) || !module->cell(c.n1) || !module->cell(c.n2))
+						continue;
+					Cell *m4 = module->addCell(NEW_ID, ID($_MUX4_));
+					m4->setPort(ID::A, c.m0->getPort(ID::B));
+					m4->setPort(ID::B, c.m1->getPort(ID::B));
+					m4->setPort(ID::C, c.m2->getPort(ID::B));
+					m4->setPort(ID::D, c.m2->getPort(ID::A));
+					m4->setPort(ID::S, sel);
+					m4->setPort(ID::T, t);
+					m4->setPort(ID::Y, c.m0->getPort(ID::Y));
+					module->remove(c.m0);
+					module->remove(c.m1);
+					module->remove(c.m2);
+					count++;
+				}
+			}
+			log("%s: %d priority chains built as 4:1 muxes.\n", log_id(module), count);
+		}
+	}
+} Ice40LseMuxChainPass;
 
 PRIVATE_NAMESPACE_END

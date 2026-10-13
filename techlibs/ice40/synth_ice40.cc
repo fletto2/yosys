@@ -400,6 +400,7 @@ struct SynthIce40Pass : public ScriptPass
 			}
 			if (!noabc || help_mode) {
 				// LSE builds 4:1 multiplexers from two LUT4s
+				run("ice40_lsemuxchain", "                (unless -noabc)");
 				run("muxcover -mux4=300", "                (unless -noabc)");
 				run("techmap -map +/ice40/lse_mux_map.v", "(unless -noabc)");
 				// LSE duplicates small logic into its readers rather than sharing it, so
