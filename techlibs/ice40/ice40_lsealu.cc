@@ -563,6 +563,32 @@ struct Ice40LseRamCePass : public Pass {
 						if (cell->hasPort(port))
 							for (auto b : sigmap(cell->getPort(port)))
 								addr_bits.insert(b);
+			// a register whose next value is the RAM address itself (a read address merged
+			// into the RAM: addr = rst ? 0 : en ? next : q) too: LSE gives both one net
+			{
+				dict<SigBit, Cell*> gate_drv;
+				for (auto c : module->cells())
+					if (c->type.in(ID($_MUX_), ID($_AND_), ID($_ANDNOT_), ID($_OR_)))
+						gate_drv[sigmap(c->getPort(ID::Y).as_bit())] = c;
+				pool<SigBit> extra;
+				for (auto b : addr_bits) {
+					std::vector<std::pair<SigBit, int>> stack = {{b, 0}};
+					while (!stack.empty()) {
+						auto [x, depth] = stack.back();
+						stack.pop_back();
+						if (!gate_drv.count(x) || depth >= 2)
+							continue;
+						Cell *g = gate_drv.at(x);
+						for (auto port : {ID::A, ID::B}) {
+							SigBit y = sigmap(g->getPort(port).as_bit());
+							extra.insert(y);
+							stack.push_back({y, depth + 1});
+						}
+					}
+				}
+				for (auto y : extra)
+					addr_bits.insert(y);
+			}
 			int nsr = 0;
 			std::vector<Cell*> srs;
 			dict<SigBit, Cell*> or_of;
