@@ -750,6 +750,12 @@ struct Ice40LsePolarityPass : public Pass {
 						continue;
 					if (carry_nets.count(sigmap(cell->getPort(ID(I3)).as_bit())))
 						continue;
+					bool feeds_sum = false;
+					for (auto &u : lut_users.at(o))
+						if (carry_nets.count(sigmap(u.first->getPort(ID(I3)).as_bit())))
+							feeds_sum = true;
+					if (feeds_sum)
+						continue;
 					Const init = init_of(cell), ninit = init;
 					for (int i = 0; i < 16; i++)
 						ninit.set(i, init[i] == State::S1 ? State::S0 : State::S1);
