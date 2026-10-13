@@ -120,7 +120,8 @@ struct Ice40IopackPass : public Pass {
 			Cell *io = module->addCell(NEW_ID, ID(SB_IO));
 			io->setPort(ID(PACKAGE_PIN), pin);
 			io->setParam(ID(PIN_TYPE), Const(out_type << 2 | in_type, 6));
-			io->setParam(ID(PULLUP), Const(1, 1));
+			// LSE enables the pull-up only on pads that are read
+			io->setParam(ID(PULLUP), Const(in_type == 0b10 && out_type != 0 ? 0 : 1, 1));
 			io->setParam(ID(NEG_TRIGGER), Const(0, 1));
 			return io;
 		};

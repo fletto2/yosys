@@ -280,14 +280,16 @@ struct SynthIce40Pass : public ScriptPass
 			run("opt_merge");
 		}
 
-		if (check_label("flatten", "(unless -noflatten)"))
+		if (check_label("flatten"))
 		{
-			if (flatten) {
-				run("check");
-				run("flatten");
-				run("tribuf -logic");
-				run("deminout");
+			if (flatten || help_mode) {
+				run("check", "                 (if -flatten)");
+				run("flatten", "               (if -flatten)");
 			}
+			// with or without flattening: a `x ? y : 'bz' on a top-level inout must
+			// stay a tristate buffer for the pad, not become plain logic
+			run("tribuf -logic");
+			run("deminout");
 		}
 
 		if (check_label("coarse"))
