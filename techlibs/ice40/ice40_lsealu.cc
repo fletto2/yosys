@@ -1294,6 +1294,12 @@ struct Ice40LseReducePass : public Pass {
 					if (w->port_output)
 						for (auto bit : sigmap(SigSpec(w)))
 							fanout[bit]++;
+				pool<SigBit> or_input;
+				for (auto cell : module->cells())
+					if (cell->type == ID($_OR_)) {
+						or_input.insert(sigmap(cell->getPort(ID::A).as_bit()));
+						or_input.insert(sigmap(cell->getPort(ID::B).as_bit()));
+					}
 				auto drv = [&](SigBit b, IdString type) -> Cell* {
 					b = sigmap(b);
 					if (!driver.count(b) || driver.at(b)->type != type)
@@ -1305,12 +1311,7 @@ struct Ice40LseReducePass : public Pass {
 						continue;
 					SigBit out = sigmap(root->getPort(ID::Y).as_bit());
 					// only the root of a tree: not an OR feeding a single OR
-					bool inner = false;
-					if (fanout[out] == 1)
-						for (auto cell : module->cells())
-							if (cell->type == ID($_OR_) && (sigmap(cell->getPort(ID::A).as_bit()) == out || sigmap(cell->getPort(ID::B).as_bit()) == out))
-								inner = true;
-					if (inner)
+					if (fanout[out] == 1 && or_input.count(out))
 						continue;
 					std::vector<SigBit> leaves;
 					std::vector<Cell*> tree;
