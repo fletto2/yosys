@@ -1254,4 +1254,149 @@ struct Ice40LseMuxSelPass : public Pass {
 	}
 } Ice40LseMuxSelPass;
 
+struct Ice40LseReducePass : public Pass {
+	Ice40LseReducePass() : Pass("ice40_lsereduce", "move OR reductions above wide multiplexers as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsereduce [selection]\n");
+		log("\n");
+		log("An OR tree over the outputs of 2:1 multiplexers that share a select becomes a\n");
+		log("multiplexer of two OR trees, one per data side, repeated down through further\n");
+		log("2:1 levels. Done only for chains of at least two 2:1 levels; 4:1 multiplexers\n");
+		log("($_MUX4_, after muxcover) stop it. An AND with the select counts as a\n");
+		log("multiplexer with a zero side.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEREDUCE pass.\n");
+		for (auto module : design->selected_modules()) {
+			int count = 0;
+			for (bool changed = true; changed; ) {
+				changed = false;
+				SigMap sigmap(module);
+				dict<SigBit, Cell*> driver;
+				dict<SigBit, int> fanout;
+				for (auto cell : module->cells()) {
+					for (auto &conn : cell->connections()) {
+						if (cell->output(conn.first))
+							for (auto bit : sigmap(conn.second))
+								driver[bit] = cell;
+						else
+							for (auto bit : sigmap(conn.second))
+								fanout[bit]++;
+					}
+				}
+				for (auto w : module->wires())
+					if (w->port_output)
+						for (auto bit : sigmap(SigSpec(w)))
+							fanout[bit]++;
+				auto drv = [&](SigBit b, IdString type) -> Cell* {
+					b = sigmap(b);
+					if (!driver.count(b) || driver.at(b)->type != type)
+						return nullptr;
+					return driver.at(b);
+				};
+				for (auto root : module->selected_cells()) {
+					if (root->type != ID($_OR_))
+						continue;
+					SigBit out = sigmap(root->getPort(ID::Y).as_bit());
+					// only the root of a tree: not an OR feeding a single OR
+					bool inner = false;
+					if (fanout[out] == 1)
+						for (auto cell : module->cells())
+							if (cell->type == ID($_OR_) && (sigmap(cell->getPort(ID::A).as_bit()) == out || sigmap(cell->getPort(ID::B).as_bit()) == out))
+								inner = true;
+					if (inner)
+						continue;
+					std::vector<SigBit> leaves;
+					std::vector<Cell*> tree;
+					std::function<void(SigBit)> collect = [&](SigBit b) {
+						b = sigmap(b);
+						Cell *c = drv(b, ID($_OR_));
+						if (c && (c == root || fanout[b] == 1)) {
+							tree.push_back(c);
+							collect(c->getPort(ID::A).as_bit());
+							collect(c->getPort(ID::B).as_bit());
+						} else
+							leaves.push_back(b);
+					};
+					collect(out);
+					if (GetSize(leaves) < 2)
+						continue;
+					auto or_tree = [&](std::vector<SigBit> bits) -> SigBit {
+						std::vector<SigBit> v;
+						for (auto b : bits) {
+							if (b == State::S1)
+								return State::S1;
+							if (b != State::S0)
+								v.push_back(b);
+						}
+						if (v.empty())
+							return State::S0;
+						SigBit r = v[0];
+						for (int i = 1; i < GetSize(v); i++)
+							r = module->OrGate(NEW_ID, r, v[i]);
+						return r;
+					};
+					// split the leaves by a common 2:1 select, if they have one
+					auto split = [&](const std::vector<SigBit> &bits, SigBit &sel, std::vector<SigBit> &side_a, std::vector<SigBit> &side_b) {
+						sel = SigBit();
+						for (auto b : bits)
+							if (Cell *m = drv(b, ID($_MUX_))) {
+								sel = sigmap(m->getPort(ID::S).as_bit());
+								break;
+							}
+						if (!sel.wire)
+							return false;
+						int n = 0;
+						for (auto b : bits) {
+							b = sigmap(b);
+							if (b == State::S0)
+								continue;
+							if (Cell *m = drv(b, ID($_MUX_)); m && sigmap(m->getPort(ID::S).as_bit()) == sel) {
+								side_a.push_back(m->getPort(ID::A).as_bit());
+								side_b.push_back(m->getPort(ID::B).as_bit());
+								n++;
+							} else if (Cell *a = drv(b, ID($_AND_)); a && (sigmap(a->getPort(ID::A).as_bit()) == sel || sigmap(a->getPort(ID::B).as_bit()) == sel)) {
+								side_b.push_back(sigmap(a->getPort(ID::A).as_bit()) == sel ? a->getPort(ID::B).as_bit() : a->getPort(ID::A).as_bit());
+							} else
+								return false;
+						}
+						return n > 0;
+					};
+					std::function<int(const std::vector<SigBit>&, int)> levels = [&](const std::vector<SigBit> &bits, int depth) -> int {
+						SigBit sel;
+						std::vector<SigBit> sa, sb;
+						if (depth > 8 || !split(bits, sel, sa, sb))
+							return 0;
+						return 1 + std::max(levels(sa, depth + 1), levels(sb, depth + 1));
+					};
+					std::function<SigBit(const std::vector<SigBit>&, int)> push = [&](const std::vector<SigBit> &bits, int depth) -> SigBit {
+						SigBit sel;
+						std::vector<SigBit> sa, sb;
+						if (depth > 8 || !split(bits, sel, sa, sb))
+							return or_tree(bits);
+						return module->MuxGate(NEW_ID, push(sa, depth + 1), push(sb, depth + 1), sel);
+					};
+					if (levels(leaves, 0) < 2)
+						continue;
+					SigBit y = push(leaves, 0);
+					SigSpec root_y = root->getPort(ID::Y);
+					for (auto c : tree)
+						module->remove(c);
+					module->connect(root_y, y);
+					count++;
+					changed = true;
+					break;
+				}
+			}
+			log("%s: %d OR trees moved above a multiplexer.\n", log_id(module), count);
+		}
+	}
+} Ice40LseReducePass;
+
 PRIVATE_NAMESPACE_END
