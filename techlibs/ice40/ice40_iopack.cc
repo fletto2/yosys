@@ -57,7 +57,7 @@ struct Ice40IopackPass : public Pass {
 		dict<SigBit, std::pair<Cell*, IdString>> driver;
 		dict<SigBit, int> nusers;
 		dict<SigBit, SigBit> port_bit;
-		pool<SigBit> useioff_bits;
+		pool<SigBit> useioff_bits, useioff_attr;
 
 		for (auto wire : module->wires()) {
 			if (!wire->port_id)
@@ -68,6 +68,8 @@ struct Ice40IopackPass : public Pass {
 					nusers[sigmap(bit)]++;
 				if (wire->port_output)
 					useioff_bits.insert(sigmap(bit));
+				if (wire->port_output && wire->has_attribute(ID(syn_useioff)))
+					useioff_attr.insert(sigmap(bit));
 			}
 		}
 		for (auto cell : module->cells())
@@ -133,6 +135,10 @@ struct Ice40IopackPass : public Pass {
 			Cell *ff = it->second.first;
 			IdString t = ff->type;
 			if (!t.in(ID(SB_DFF), ID(SB_DFFE), ID(SB_DFFSR), ID(SB_DFFESR), ID(SB_DFFSS), ID(SB_DFFESS)))
+				continue;
+			// LSE keeps a flip-flop with a synchronous reset/set in the fabric unless the
+			// port asks for the I/O register (syn_useioff)
+			if (t.in(ID(SB_DFFSR), ID(SB_DFFESR), ID(SB_DFFSS), ID(SB_DFFESS)) && !useioff_attr.count(bit))
 				continue;
 			SigBit d = ff->getPort(ID::D);
 			if (t.in(ID(SB_DFFSR), ID(SB_DFFESR)))

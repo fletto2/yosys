@@ -919,7 +919,18 @@ struct Ice40LseCmpPass : public Pass {
 					continue;
 				int w = std::max(GetSize(cell->getPort(ID::A)), GetSize(cell->getPort(ID::B)));
 				SigSpec a = sigmap(cell->getPort(ID::A)), b = sigmap(cell->getPort(ID::B));
-				if (w < 3 || a.has_const() || b.has_const())
+				// zero-extension of one operand is fine (handled below); other constant bits
+				// are left to cmp2lut/ABC
+				SigSpec ac = a, bc = b;
+				ac.extend_u0(w, is_signed); bc.extend_u0(w, is_signed);
+				auto lead0 = [&](const SigSpec &sig) { int n = 0; while (n < GetSize(sig) && sig[GetSize(sig)-1-n] == State::S0) n++; return n; };
+				auto other_const = [&](const SigSpec &sig) {
+					int n = lead0(sig);
+					for (int i = 0; i < GetSize(sig) - n; i++)
+						if (!sig[i].wire) return true;
+					return false;
+				};
+				if (w < 3 || other_const(ac) || other_const(bc) || lead0(ac) > w - 2 || lead0(bc) > w - 2)
 					continue;
 				bool offset = false;
 				for (auto bit : a) if (const_offset.count(bit)) offset = true;
@@ -931,10 +942,29 @@ struct Ice40LseCmpPass : public Pass {
 				SigBit r;
 				if (eq)
 					r = equality(a, b, cell->type == ID($ne));
-				else if (cell->type == ID($lt)) r = less(a, b, false);
-				else if (cell->type == ID($le)) r = less(a, b, true);
-				else if (cell->type == ID($gt)) r = less(b, a, false);
-				else r = less(b, a, true);
+				else {
+					SigSpec x = a, y = b;      // x < y (or x <= y)
+					bool or_equal = cell->type.in(ID($le), ID($ge));
+					if (cell->type.in(ID($gt), ID($ge)))
+						std::swap(x, y);
+					// LSE ripples only over the bits both operands have; the other
+					// operand's extra high bits are ORed and override the result (which
+					// becomes a flip-flop's sync reset/set)
+					int k = 0;
+					while (k < w - 2 && y[w-1-k] == State::S0 && x[w-1-k].wire) k++;
+					int kx = 0;
+					while (kx < w - 2 && x[w-1-kx] == State::S0 && y[w-1-kx].wire) kx++;
+					if (k > 0) {
+						SigBit hi = module->ReduceOr(NEW_ID, x.extract(w - k, k));
+						SigBit lo = less(x.extract(0, w - k), y.extract(0, w - k), or_equal);
+						r = module->Mux(NEW_ID, lo, State::S0, hi).as_bit();
+					} else if (kx > 0) {
+						SigBit hi = module->ReduceOr(NEW_ID, y.extract(w - kx, kx));
+						SigBit lo = less(x.extract(0, w - kx), y.extract(0, w - kx), or_equal);
+						r = module->Mux(NEW_ID, lo, State::S1, hi).as_bit();
+					} else
+						r = less(x, y, or_equal);
+				}
 				SigSpec y = cell->getPort(ID::Y);
 				SigSpec ry(r);
 				ry.extend_u0(GetSize(y));
