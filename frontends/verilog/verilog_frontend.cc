@@ -149,6 +149,11 @@ struct VerilogFrontend : public Frontend {
 		log("\n");
 		log("Load modules from a Verilog file to the current design. A large subset of\n");
 		log("Verilog-2005 is supported.\n");
+		log("\n");		log("Synplify/LSE directives in comments, e.g. `module m(...) /* synthesis\n");
+		log("syn_hier = \"hard\" */;' or `wire w /* synthesis syn_keep = 1 */;', become\n");
+		log("attributes of the module, net or memory they follow; syn_hier=\"hard\",\n");
+		log("syn_keep/syn_preserve and syn_ramstyle also set keep_hierarchy, keep,\n");
+		log("ram_style and no_rw_check, as the vendor tools obey them.\n");
 		log("\n");
 		log("    -sv\n");
 		log("        enable support for SystemVerilog features. (only a small subset\n");
@@ -244,14 +249,6 @@ struct VerilogFrontend : public Frontend {
 		log("    -nodpi\n");
 		log("        disable DPI-C support\n");
 		log("\n");
-		log("    -synattr\n");
-		log("        honour Synplify/LSE directives in comments, e.g.\n");
-		log("        `module m(...) /* synthesis syn_hier = \"hard\" */;' or\n");
-		log("        `wire w /* synthesis syn_keep = 1 */;'. Each becomes an attribute\n");
-		log("        of the module, net or memory it follows, and syn_hier=\"hard\",\n");
-		log("        syn_keep/syn_preserve and syn_ramstyle also set keep_hierarchy,\n");
-		log("        keep, ram_style and no_rw_check, as the vendor tools obey them.\n");
-		log("\n");
 		log("    -noblackbox\n");
 		log("        do not automatically add a (* blackbox *) attribute to an\n");
 		log("        empty module.\n");
@@ -343,7 +340,7 @@ struct VerilogFrontend : public Frontend {
 		bool flag_ppdump = false;
 		bool flag_nopp = false;
 		bool flag_nodpi = false;
-		bool flag_synattr = false;
+		bool flag_synattr = true;   // Synplify/LSE comment directives are always honoured
 		bool flag_noopt = false;
 		bool flag_icells = false;
 		bool flag_pwires = false;
@@ -477,8 +474,7 @@ struct VerilogFrontend : public Frontend {
 				flag_nopp = true;
 				continue;
 			}
-			if (arg == "-synattr") {
-				flag_synattr = true;
+			if (arg == "-synattr") {  // kept for old scripts; this is the default
 				continue;
 			}
 			if (arg == "-nodpi") {

@@ -228,233 +228,13 @@ struct Ice40LseAddEnablePass : public Pass {
 	}
 } Ice40LseAddEnablePass;
 
-struct Ice40LseMuxPass : public Pass {
-	Ice40LseMuxPass() : Pass("ice40_lsemux", "keep selected 2:1 muxes as their own LUTs, as Lattice LSE does") { }
-	void help() override
-	{
-		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
-		log("\n");
-		log("    ice40_lsemux [-chain] [-ff] [-selabsorb] [selection]\n");
-		log("\n");
-		log("Maps $_MUX_ cells to SB_LUT4 (s ? b : a) before ABC can merge them into other\n");
-		log("logic: -chain those whose output feeds another mux, -ff those feeding a\n");
-		log("flip-flop's D input.\n");
-		log("\n");
-		log("-selabsorb maps a $_MUX_ whose select comes from a 2-input gate into one LUT4\n");
-		log("(A, B and the gate's inputs), copying the gate, as LSE does.\n");
-		log("\n");
-	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) override
-	{
-		bool chain = false, ff = false, selabsorb = false;
-		size_t argidx;
-		for (argidx = 1; argidx < args.size(); argidx++) {
-			if (args[argidx] == "-chain") { chain = true; continue; }
-			if (args[argidx] == "-ff") { ff = true; continue; }
-			if (args[argidx] == "-selabsorb") { selabsorb = true; continue; }
-			break;
-		}
-		extra_args(args, argidx, design);
-		log_header(design, "Executing ICE40_LSEMUX pass.\n");
-		for (auto module : design->selected_modules()) {
-			SigMap sigmap(module);
-			dict<SigBit, pool<std::pair<IdString, IdString>>> loads;     // bit -> (cell type, port)
-			for (auto cell : module->cells())
-				for (auto &conn : cell->connections())
-					if (!cell->output(conn.first))
-						for (auto bit : sigmap(conn.second))
-							loads[bit].insert({cell->type, conn.first});
-			int n = 0, nsel = 0;
-			dict<SigBit, Cell*> gate_drv;
-			if (selabsorb)
-				for (auto cell : module->cells())
-					if (cell->type.in(ID($_AND_), ID($_OR_), ID($_XOR_), ID($_NAND_), ID($_NOR_), ID($_XNOR_), ID($_ANDNOT_), ID($_ORNOT_)))
-						gate_drv[sigmap(cell->getPort(ID::Y))[0]] = cell;
-			for (auto cell : module->selected_cells()) {
-				if (cell->type != ID($_MUX_))
-					continue;
-				if (selabsorb && gate_drv.count(sigmap(cell->getPort(ID::S))[0])) {
-					Cell *g = gate_drv.at(sigmap(cell->getPort(ID::S))[0]);
-					// LUT inputs: I0 = A, I1 = B, I2 = x, I3 = y; s = gate(x, y)
-					int init = 0;
-					for (int i = 0; i < 16; i++) {
-						bool a = i & 1, b = i & 2, x = i & 4, y = i & 8, sv;
-						IdString t = g->type;
-						if (t == ID($_AND_)) sv = x && y;
-						else if (t == ID($_OR_)) sv = x || y;
-						else if (t == ID($_XOR_)) sv = x != y;
-						else if (t == ID($_NAND_)) sv = !(x && y);
-						else if (t == ID($_NOR_)) sv = !(x || y);
-						else if (t == ID($_XNOR_)) sv = x == y;
-						else if (t == ID($_ANDNOT_)) sv = x && !y;
-						else sv = x || !y;  // $_ORNOT_
-						if (sv ? b : a)
-							init |= 1 << i;
-					}
-					Cell *lut = module->addCell(NEW_ID, ID(SB_LUT4));
-					lut->setParam(ID(LUT_INIT), Const(init, 16));
-					lut->setPort(ID(I0), cell->getPort(ID::A));
-					lut->setPort(ID(I1), cell->getPort(ID::B));
-					lut->setPort(ID(I2), g->getPort(ID::A));
-					lut->setPort(ID(I3), g->getPort(ID::B));
-					lut->setPort(ID::O, cell->getPort(ID::Y));
-					module->remove(cell);
-					nsel++;
-					continue;
-				}
-				bool keep = false;
-				for (auto &l : loads[sigmap(cell->getPort(ID::Y))[0]]) {
-					if (chain && l.first == ID($_MUX_) && l.second != ID::S)
-						keep = true;
-					if (ff && (l.first.begins_with("\\SB_DFF") || l.first.begins_with("$_DFF")) && l.second == ID::D)
-						keep = true;
-				}
-				if (!keep)
-					continue;
-				Cell *lut = module->addCell(NEW_ID, ID(SB_LUT4));
-				lut->setParam(ID(LUT_INIT), Const(0x00ca, 16));
-				lut->setPort(ID(I0), cell->getPort(ID::A));
-				lut->setPort(ID(I1), cell->getPort(ID::B));
-				lut->setPort(ID(I2), cell->getPort(ID::S));
-				lut->setPort(ID(I3), State::S0);
-				lut->setPort(ID::O, cell->getPort(ID::Y));
-				module->remove(cell);
-				n++;
-			}
-			log("%s: %d 2:1 muxes kept as LUTs, %d with their select gate.\n", log_id(module), n, nsel);
-		}
-	}
-} Ice40LseMuxPass;
-
-struct Ice40LutMergePass : public Pass {
-	Ice40LutMergePass() : Pass("ice40_lutmerge", "greedily merge SB_LUT4 cells into their consumers (LSE-style mapping)") { }
-	void help() override
-	{
-		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
-		log("\n");
-		log("    ice40_lutmerge [-dup] [-reverse] [selection]\n");
-		log("\n");
-		log("Merges a LUT into the LUT it feeds while their inputs fit in 4. With -dup, a LUT\n");
-		log("feeding several LUTs is copied into all of them when every one can take it.\n");
-		log("-reverse visits LUTs from the outputs back instead of from the inputs forward.\n");
-		log("LUTs carrying the lse_fixed attribute are left alone.\n");
-		log("\n");
-	}
-	void execute(std::vector<std::string> args, RTLIL::Design *design) override
-	{
-		bool dup = false, reverse = false;
-		size_t argidx;
-		for (argidx = 1; argidx < args.size(); argidx++) {
-			if (args[argidx] == "-dup") { dup = true; continue; }
-			if (args[argidx] == "-reverse") { reverse = true; continue; }
-			break;
-		}
-		extra_args(args, argidx, design);
-		log_header(design, "Executing ICE40_LUTMERGE pass.\n");
-		static const IdString pins[4] = {ID(I0), ID(I1), ID(I2), ID(I3)};
-		for (auto module : design->selected_modules()) {
-			SigMap sigmap(module);
-			int merged = 0;
-			bool changed = true;
-			while (changed) {
-				changed = false;
-				dict<SigBit, Cell*> lut_of;
-				dict<SigBit, std::vector<std::pair<Cell*, int>>> users;   // bit -> (lut, pin index) ; pin -1 = other
-				pool<SigBit> external;
-				for (auto cell : module->cells()) {
-					if (cell->type == ID(SB_LUT4)) {
-						lut_of[sigmap(cell->getPort(ID::O))[0]] = cell;
-						for (int i = 0; i < 4; i++) {
-							SigBit b = sigmap(cell->getPort(pins[i]))[0];
-							if (b.wire) users[b].push_back({cell, i});
-						}
-					} else
-						for (auto &conn : cell->connections())
-							if (!cell->output(conn.first))
-								for (auto b : sigmap(conn.second))
-									external.insert(b);
-				}
-				for (auto w : module->wires())
-					if (w->port_output || w->get_bool_attribute(ID::keep))
-						for (auto b : sigmap(SigSpec(w)))
-							external.insert(b);
-				std::vector<Cell*> order;
-				for (auto &it : lut_of) order.push_back(it.second);
-				std::sort(order.begin(), order.end(), [](Cell *a, Cell *b) { return a->name < b->name; });
-				if (reverse) std::reverse(order.begin(), order.end());
-				pool<Cell*> dead;
-				for (auto L : order) {
-					if (dead.count(L) || L->get_bool_attribute(ID(lse_fixed)))
-						continue;
-					SigBit out = sigmap(L->getPort(ID::O))[0];
-					if (external.count(out) || !users.count(out))
-						continue;
-					auto &us = users.at(out);
-					if (us.size() > 1 && !dup)
-						continue;
-					std::vector<SigBit> lin;
-					for (int i = 0; i < 4; i++) lin.push_back(sigmap(L->getPort(pins[i]))[0]);
-					// every consumer must be able to take L
-					bool ok = true;
-					for (auto &u : us) {
-						Cell *C = u.first;
-						if (dead.count(C) || C == L || C->get_bool_attribute(ID(lse_fixed))) { ok = false; break; }
-						pool<SigBit> in;
-						for (int i = 0; i < 4; i++) {
-							SigBit b = sigmap(C->getPort(pins[i]))[0];
-							if (b != out && b.wire) in.insert(b);
-						}
-						for (auto b : lin) if (b.wire) in.insert(b);
-						if (GetSize(in) > 4) { ok = false; break; }
-					}
-					if (!ok) continue;
-					pool<Cell*> done;
-					for (auto &u : us) {
-						Cell *C = u.first;
-						if (done.count(C)) continue;
-						done.insert(C);
-						std::vector<SigBit> cin, nin;
-						for (int i = 0; i < 4; i++) cin.push_back(sigmap(C->getPort(pins[i]))[0]);
-						for (auto b : cin) if (b != out && b.wire && std::find(nin.begin(), nin.end(), b) == nin.end()) nin.push_back(b);
-						for (auto b : lin) if (b.wire && std::find(nin.begin(), nin.end(), b) == nin.end()) nin.push_back(b);
-						int linit = L->getParam(ID(LUT_INIT)).as_int(), cinit = C->getParam(ID(LUT_INIT)).as_int();
-						int ninit = 0;
-						for (int v = 0; v < 16; v++) {
-							auto val = [&](SigBit b) {
-								if (!b.wire) return b.data == State::S1;
-								int k = std::find(nin.begin(), nin.end(), b) - nin.begin();
-								return k < GetSize(nin) && ((v >> k) & 1);
-							};
-							int li = 0;
-							for (int i = 0; i < 4; i++) if (val(lin[i])) li |= 1 << i;
-							bool lo = (linit >> li) & 1;
-							int ci = 0;
-							for (int i = 0; i < 4; i++) if (cin[i] == out ? lo : val(cin[i])) ci |= 1 << i;
-							if ((cinit >> ci) & 1) ninit |= 1 << v;
-						}
-						for (int i = 0; i < 4; i++)
-							C->setPort(pins[i], i < GetSize(nin) ? SigSpec(nin[i]) : SigSpec(State::S0));
-						C->setParam(ID(LUT_INIT), Const(ninit, 16));
-					}
-					dead.insert(L);
-					merged++;
-					changed = true;
-				}
-				for (auto L : dead)
-					module->remove(L);
-			}
-			log("%s: merged %d LUTs.\n", log_id(module), merged);
-		}
-	}
-} Ice40LutMergePass;
-
 struct Ice40LseRamCePass : public Pass {
 	Ice40LseRamCePass() : Pass("ice40_lseramce", "drop the clock enable of flip-flops loaded from RAM read data, as Lattice LSE does") { }
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    ice40_lseramce [-absorb]\n");
+		log("    ice40_lseramce\n");
 		log("\n");
 		log("LSE (area goal) does not give a flip-flop a clock enable when its D comes straight\n");
 		log("from an SPRAM or EBR read port and its output is read by other logic (one that\n");
@@ -462,16 +242,12 @@ struct Ice40LseRamCePass : public Pass {
 		log("of D. This pass does the same to SB_DFF*E* cells, following RAM read data through\n");
 		log("muxes of RAM data and module ports.\n");
 		log("Run after the flip-flops are mapped to SB_DFF* cells.\n");
-		log("\n");
-		log("    -absorb\n");
-		log("        when the enable comes from a 2-input gate, build that gate and the hold\n");
-		log("        mux in one LUT (LSE does this only sometimes).\n");
+
 		log("\n");
 	}
 
 	typedef std::pair<IdString, IdString> RamId;	// (module, cell)
 	Design *design;
-	bool absorb;
 	dict<IdString, dict<SigBit, pool<RamId>>> ram_bits;	// per module: bit -> RAMs whose read data it is
 	dict<IdString, dict<std::pair<IdString, int>, pool<RamId>>> in_ram, out_ram;	// port bit -> RAMs
 	dict<IdString, std::vector<std::pair<Module*, Cell*>>> parents;
@@ -546,13 +322,7 @@ struct Ice40LseRamCePass : public Pass {
 	void execute(std::vector<std::string> args, RTLIL::Design *d) override
 	{
 		design = d;
-		absorb = false;
-		size_t argidx;
-		for (argidx = 1; argidx < args.size(); argidx++) {
-			if (args[argidx] == "-absorb") { absorb = true; continue; }
-			break;
-		}
-		extra_args(args, argidx, design);
+		extra_args(args, 1, design);
 		log_header(design, "Executing ICE40_LSERAMCE pass.\n");
 		ram_bits.clear(); in_ram.clear(); out_ram.clear(); parents.clear();
 
@@ -625,38 +395,10 @@ struct Ice40LseRamCePass : public Pass {
 				if (bits.count(db) && used_internally(module, cell->getPort(ID::Q).as_bit()))
 					todo.push_back(cell);
 			}
-			dict<SigBit, Cell*> gate_of;
-			for (auto c : module->cells())
-				if (c->type.in(ID($_AND_), ID($_OR_), ID($_ANDNOT_), ID($_ORNOT_), ID($_NAND_), ID($_NOR_)))
-					gate_of[sigmap(c->getPort(ID::Y).as_bit())] = c;
 			for (auto cell : todo) {
 				SigBit q = cell->getPort(ID::Q).as_bit(), dd = cell->getPort(ID::D).as_bit(), e = cell->getPort(ID::E).as_bit();
 				SigBit nd = module->addWire(NEW_ID);
-				SigBit es = sigmap(e);
-				if (absorb && gate_of.count(es)) {
-					// LSE builds the hold mux and the last gate of the enable in one LUT
-					Cell *g = gate_of.at(es);
-					IdString t = g->type;
-					Const init(State::S0, 16);
-					for (int i = 0; i < 16; i++) {
-						bool vq = i & 1, vd = i & 2, x = i & 4, y = i & 8, sel;
-						if (t == ID($_AND_)) sel = x && y;
-						else if (t == ID($_OR_)) sel = x || y;
-						else if (t == ID($_ANDNOT_)) sel = x && !y;
-						else if (t == ID($_ORNOT_)) sel = x || !y;
-						else if (t == ID($_NAND_)) sel = !(x && y);
-						else sel = !(x || y);
-						init.set(i, (sel ? vd : vq) ? State::S1 : State::S0);
-					}
-					Cell *l = module->addCell(NEW_ID, ID(SB_LUT4));
-					l->setParam(ID(LUT_INIT), init);
-					l->setPort(ID(I0), q);
-					l->setPort(ID(I1), dd);
-					l->setPort(ID(I2), g->getPort(ID::A));
-					l->setPort(ID(I3), g->getPort(ID::B));
-					l->setPort(ID::O, nd);
-				} else
-					module->addMuxGate(NEW_ID, q, dd, e, nd);
+				module->addMuxGate(NEW_ID, q, dd, e, nd);
 				cell->unsetPort(ID::E);
 				cell->setPort(ID::D, nd);
 				cell->type = noen.at(cell->type);
@@ -791,7 +533,7 @@ struct Ice40LsePolarityPass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    ice40_lsepolarity [-ones] [selection]\n");
+		log("    ice40_lsepolarity [selection]\n");
 		log("\n");
 		log("ABC maps AND nodes, so a LUT that only feeds other LUTs often comes out\n");
 		log("complemented (a mux as NOT mux, re-inverted in the next LUT). LSE maps from\n");
@@ -799,10 +541,7 @@ struct Ice40LsePolarityPass : public Pass {
 		log("whose output only drives SB_LUT4 inputs, absorbing the inversion into the LUTs\n");
 		log("they drive, when that makes more LUT inputs positive unate (greedy). Area is\n");
 		log("unchanged.\n");
-		log("\n");
-		log("    -ones\n");
-		log("        instead complement every such LUT whose truth table has more zeros than\n");
-		log("        ones.\n");
+
 		log("\n");
 	}
 	// +1 per input the function is positive unate in, -1 per negative unate input
@@ -833,13 +572,7 @@ struct Ice40LsePolarityPass : public Pass {
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
-		bool by_ones = false;
-		size_t argidx;
-		for (argidx = 1; argidx < args.size(); argidx++) {
-			if (args[argidx] == "-ones") { by_ones = true; continue; }
-			break;
-		}
-		extra_args(args, argidx, design);
+		extra_args(args, 1, design);
 		log_header(design, "Executing ICE40_LSEPOLARITY pass.\n");
 		for (auto module : design->selected_modules()) {
 			SigMap sigmap(module);
@@ -882,23 +615,15 @@ struct Ice40LsePolarityPass : public Pass {
 					Const init = init_of(cell), ninit = init;
 					for (int i = 0; i < 16; i++)
 						ninit.set(i, init[i] == State::S1 ? State::S0 : State::S1);
-					bool flip;
-					if (by_ones) {
-						int ones = 0;
-						for (int i = 0; i < 16; i++) if (init[i] == State::S1) ones++;
-						flip = ones * 2 < 16;
-						if (pass > 0) flip = false;
-					} else {
-						int before = unate_score(init), after = unate_score(ninit);
-						dict<Cell*, Const> fan;
-						for (auto &u : lut_users.at(o))
-							fan[u.first] = fan.count(u.first) ? fan.at(u.first) : init_of(u.first);
-						for (auto &f : fan) before += unate_score(f.second);
-						for (auto &u : lut_users.at(o))
-							fan[u.first] = flip_input(fan.at(u.first), u.second);
-						for (auto &f : fan) after += unate_score(f.second);
-						flip = after > before;
-					}
+					int before = unate_score(init), after = unate_score(ninit);
+					dict<Cell*, Const> fan;
+					for (auto &u : lut_users.at(o))
+						fan[u.first] = fan.count(u.first) ? fan.at(u.first) : init_of(u.first);
+					for (auto &f : fan) before += unate_score(f.second);
+					for (auto &u : lut_users.at(o))
+						fan[u.first] = flip_input(fan.at(u.first), u.second);
+					for (auto &f : fan) after += unate_score(f.second);
+					bool flip = after > before;
 					if (!flip)
 						continue;
 					cell->setParam(ID(LUT_INIT), ninit);

@@ -25,6 +25,14 @@ wire [15:0] MASK;
 wire [10:0] RADDR = {PORT_R_ADDR[0], PORT_R_ADDR[1], PORT_R_ADDR[2], PORT_R_ADDR[10:3]};
 wire [10:0] WADDR = {PORT_W_ADDR[0], PORT_W_ADDR[1], PORT_W_ADDR[2], PORT_W_ADDR[10:3]};
 
+// LSE wires a 16-bit wide RAM straight through; the bit-reversed order below lets
+// mixed widths share one INIT layout, which 16/16 doesn't need
+`ifdef LSE
+localparam DIRECT = PORT_R_WIDTH == 16 && PORT_W_WIDTH == 16;
+`else
+localparam DIRECT = 0;
+`endif
+
 function [1:0] mode;
 	input integer width;
 	case (width)
@@ -42,7 +50,7 @@ function [255:0] slice_init;
 	reg [11:0] a;
 	for (i = 0; i < 256; i = i + 1) begin
 		ri = i;
-		a = {idx, ri[7:4], ri[0], ri[1], ri[2], ri[3]};
+		a = DIRECT ? {idx, ri} : {idx, ri[7:4], ri[0], ri[1], ri[2], ri[3]};
 		slice_init[i] = INIT[a];
 	end
 endfunction
@@ -111,24 +119,27 @@ case(PORT_R_WIDTH)
 		};
 	end
 	16: begin
-		assign PORT_R_RD_DATA = {
-			RDATA[15],
-			RDATA[7],
-			RDATA[11],
-			RDATA[3],
-			RDATA[13],
-			RDATA[5],
-			RDATA[9],
-			RDATA[1],
-			RDATA[14],
-			RDATA[6],
-			RDATA[10],
-			RDATA[2],
-			RDATA[12],
-			RDATA[4],
-			RDATA[8],
-			RDATA[0]
-		};
+		if (DIRECT)
+			assign PORT_R_RD_DATA = RDATA;
+		else
+			assign PORT_R_RD_DATA = {
+				RDATA[15],
+				RDATA[7],
+				RDATA[11],
+				RDATA[3],
+				RDATA[13],
+				RDATA[5],
+				RDATA[9],
+				RDATA[1],
+				RDATA[14],
+				RDATA[6],
+				RDATA[10],
+				RDATA[2],
+				RDATA[12],
+				RDATA[4],
+				RDATA[8],
+				RDATA[0]
+			};
 	end
 endcase
 
@@ -160,42 +171,47 @@ case(PORT_W_WIDTH)
 		} = PORT_W_WR_DATA;
 	end
 	16: begin
-		assign WDATA = {
-			PORT_W_WR_DATA[15],
-			PORT_W_WR_DATA[7],
-			PORT_W_WR_DATA[11],
-			PORT_W_WR_DATA[3],
-			PORT_W_WR_DATA[13],
-			PORT_W_WR_DATA[5],
-			PORT_W_WR_DATA[9],
-			PORT_W_WR_DATA[1],
-			PORT_W_WR_DATA[14],
-			PORT_W_WR_DATA[6],
-			PORT_W_WR_DATA[10],
-			PORT_W_WR_DATA[2],
-			PORT_W_WR_DATA[12],
-			PORT_W_WR_DATA[4],
-			PORT_W_WR_DATA[8],
-			PORT_W_WR_DATA[0]
-		};
-		assign MASK = ~{
-			PORT_W_WR_BE[15],
-			PORT_W_WR_BE[7],
-			PORT_W_WR_BE[11],
-			PORT_W_WR_BE[3],
-			PORT_W_WR_BE[13],
-			PORT_W_WR_BE[5],
-			PORT_W_WR_BE[9],
-			PORT_W_WR_BE[1],
-			PORT_W_WR_BE[14],
-			PORT_W_WR_BE[6],
-			PORT_W_WR_BE[10],
-			PORT_W_WR_BE[2],
-			PORT_W_WR_BE[12],
-			PORT_W_WR_BE[4],
-			PORT_W_WR_BE[8],
-			PORT_W_WR_BE[0]
-		};
+		if (DIRECT) begin
+			assign WDATA = PORT_W_WR_DATA;
+			assign MASK = ~PORT_W_WR_BE;
+		end else begin
+			assign WDATA = {
+				PORT_W_WR_DATA[15],
+				PORT_W_WR_DATA[7],
+				PORT_W_WR_DATA[11],
+				PORT_W_WR_DATA[3],
+				PORT_W_WR_DATA[13],
+				PORT_W_WR_DATA[5],
+				PORT_W_WR_DATA[9],
+				PORT_W_WR_DATA[1],
+				PORT_W_WR_DATA[14],
+				PORT_W_WR_DATA[6],
+				PORT_W_WR_DATA[10],
+				PORT_W_WR_DATA[2],
+				PORT_W_WR_DATA[12],
+				PORT_W_WR_DATA[4],
+				PORT_W_WR_DATA[8],
+				PORT_W_WR_DATA[0]
+			};
+			assign MASK = ~{
+				PORT_W_WR_BE[15],
+				PORT_W_WR_BE[7],
+				PORT_W_WR_BE[11],
+				PORT_W_WR_BE[3],
+				PORT_W_WR_BE[13],
+				PORT_W_WR_BE[5],
+				PORT_W_WR_BE[9],
+				PORT_W_WR_BE[1],
+				PORT_W_WR_BE[14],
+				PORT_W_WR_BE[6],
+				PORT_W_WR_BE[10],
+				PORT_W_WR_BE[2],
+				PORT_W_WR_BE[12],
+				PORT_W_WR_BE[4],
+				PORT_W_WR_BE[8],
+				PORT_W_WR_BE[0]
+			};
+		end
 	end
 endcase
 

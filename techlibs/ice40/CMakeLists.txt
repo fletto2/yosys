@@ -96,5 +96,4 @@ yosys_pass(synth_ice40
 		abc9_model.v
 		iopack_map.v
 		lse_mux_map.v
-		lse_mux2_map.v
 )

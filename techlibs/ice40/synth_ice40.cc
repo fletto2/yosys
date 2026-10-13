@@ -29,24 +29,19 @@ struct SynthIce40Pass : public ScriptPass
 {
 	SynthIce40Pass() : ScriptPass("synth_ice40", "synthesis for iCE40 FPGAs") { }
 
-	void on_register() override
-	{
-		RTLIL::constpad["synth_ice40.abc9.hx.W"] = "250";
-		RTLIL::constpad["synth_ice40.abc9.lp.W"] = "400";
-		RTLIL::constpad["synth_ice40.abc9.u.W"] = "750";
-	}
-
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
 		log("    synth_ice40 [options]\n");
 		log("\n");
-		log("This command runs synthesis for iCE40 FPGAs.\n");
+		log("This command runs synthesis for iCE40 FPGAs, mapping the design the way Lattice\n");
+		log("LSE (Radiant/iCEcube2) does so the netlist comes out close to the vendor\n");
+		log("flow's. Read the sources with 'read_verilog', which honours the vendor\n");
+		log("'/* synthesis ... */' directives.\n");
 		log("\n");
 		log("    -device < hx | lp | u >\n");
-		log("        optimise timing for the specified device. default: hx\n");
-		log("        (irrelevant if -noabc)\n");
+		log("        the device family, for the cell models. default: hx\n");
 		log("\n");
 		log("    -top <module>\n");
 		log("        use the specified module as top module\n");
@@ -68,12 +63,14 @@ struct SynthIce40Pass : public ScriptPass
 		log("        from label is synonymous to 'begin', and empty to label is\n");
 		log("        synonymous to the end of the command list.\n");
 		log("\n");
+		log("    -flatten\n");
+		log("        flatten the design before synthesis. LSE keeps the module boundaries,\n");
+		log("        so by default the design is not flattened\n");
+		log("\n");
 		log("    -noflatten\n");
-		log("        do not flatten design before synthesis\n");
+		log("        do not flatten design before synthesis (the default)\n");
 		log("\n");
-		log("    -dff\n");
-		log("        run 'abc9' with -dff option\n");
-		log("\n");
+
 		log("    -nocarry\n");
 		log("        do not use SB_CARRY cells in output netlist\n");
 		log("\n");
@@ -91,37 +88,19 @@ struct SynthIce40Pass : public ScriptPass
 		log("        enable automatic inference of SB_SPRAM256KA\n");
 		log("\n");
 		log("    -dsp\n");
-		log("        use iCE40 UltraPlus DSP cells for large arithmetic\n");
+		log("        use iCE40 UltraPlus DSP cells for large arithmetic (the default)\n");
+		log("\n");
+		log("    -nodsp\n");
+		log("        do not use DSP cells\n");
 		log("\n");
 		log("    -noabc\n");
-		log("        use built-in Yosys LUT techmapping instead of abc9\n");
-		log("\n");
-		log("    -lse\n");
-		log("        map the way Lattice LSE (Radiant/iCEcube2) does, so the result comes\n");
-		log("        out close to the vendor flow's: narrow adders and comparisons with a\n");
-		log("        constant go to LUTs ('ice40_lsealu'), counter enables are folded into\n");
-		log("        the adder ('ice40_lseaddenable'), state machines are detected with\n");
-		log("        'fsm -lse', registers loaded from RAM read data lose their clock enable\n");
-		log("        ('ice40_lseramce'), inferred RAMs get no read-during-write bypass (as\n");
-		log("        -no-rw-check), DSPs are mapped with 'ice40_dsp -lse', LUTs with ABC's\n");
-		log("        choice-based mapper ('dch') instead of abc9, with the polarity of inner\n");
-		log("        LUTs chosen by 'ice40_lsepolarity', and I/O registers and pads are\n");
-		log("        packed with 'ice40_iopack -lse'. Combine with 'read_verilog -synattr'\n");
-		log("        and -noflatten for the closest match.\n");
-		log("\n");
-		log("    -dsp_absorb_regs\n");
-		log("        with -lse, let the DSPs absorb their registers anyway (LSE leaves\n");
-		log("        them in the fabric), when the design is too full otherwise.\n");
+		log("        use built-in Yosys LUT techmapping instead of ABC\n");
 		log("\n");
 		log("    -vpr\n");
 		log("        generate an output netlist (and BLIF file) suitable for VPR\n");
 		log("        (this feature is experimental and incomplete)\n");
 		log("\n");
-		log("    -no-rw-check\n");
-		log("        marks all recognized read ports as \"return don't-care value on\n");
-		log("        read/write collision\" (same result as setting the no_rw_check\n");
-		log("        attribute on all memories).\n");
-		log("\n");
+
 		log("    -latches <info|warn|error>\n");
 		log("        select the behaviour for latches that cannot be mapped to a\n");
 		log("        dedicated hardware primitive and are implemented using LUTs\n");
@@ -135,7 +114,7 @@ struct SynthIce40Pass : public ScriptPass
 	}
 
 	string top_opt, blif_file, edif_file, json_file, device_opt, latches;
-	bool nocarry, nodffe, nobram, spram, dsp, flatten, noabc, vpr, dff, no_rw_check, lse, dsp_absorb_regs;
+	bool nocarry, nodffe, nobram, spram, dsp, flatten, noabc, vpr;
 	int min_ce_use;
 
 	void clear_flags() override
@@ -146,17 +125,14 @@ struct SynthIce40Pass : public ScriptPass
 		json_file = "";
 		nocarry = false;
 		nodffe = false;
-		min_ce_use = -1;
+		min_ce_use = 3;   // LSE leaves enables used by one or two flip-flops in the logic
 		nobram = false;
 		spram = false;
-		dsp = false;
-		flatten = true;
+		dsp = true;
+		flatten = false;
 		noabc = false;
 		vpr = false;
 		device_opt = "hx";
-		no_rw_check = false;
-		lse = false;
-		dsp_absorb_regs = false;
 		latches = "error";
 	}
 
@@ -232,6 +208,10 @@ struct SynthIce40Pass : public ScriptPass
 				dsp = true;
 				continue;
 			}
+			if (args[argidx] == "-nodsp") {
+				dsp = false;
+				continue;
+			}
 			if (args[argidx] == "-noabc") {
 				noabc = true;
 				continue;
@@ -244,20 +224,8 @@ struct SynthIce40Pass : public ScriptPass
 				// removed, ABC9 is used if not -noabc
 				continue;
 			}
-			if (args[argidx] == "-lse") {
-				lse = true;
-				continue;
-			}
-			if (args[argidx] == "-dsp_absorb_regs") {
-				dsp_absorb_regs = true;
-				continue;
-			}
 			if (args[argidx] == "-noabc9") {
 				// removed, ABC9 is used if not -noabc
-				continue;
-			}
-			if (args[argidx] == "-dff") {
-				dff = true;
 				continue;
 			}
 			if (args[argidx] == "-device" && argidx+1 < args.size()) {
@@ -265,7 +233,7 @@ struct SynthIce40Pass : public ScriptPass
 				continue;
 			}
 			if (args[argidx] == "-no-rw-check") {
-				no_rw_check = true;
+				// always on: LSE builds no read-during-write bypass logic
 				continue;
 			}
 			if (args[argidx] == "-latches" && argidx+1 < args.size()) {
@@ -300,18 +268,16 @@ struct SynthIce40Pass : public ScriptPass
 			define = "-D ICE40_U";
 		else
 			define = "-D ICE40_HX";
-		std::string no_rw_check_opt = "";
 		// LSE builds no read-during-write bypass logic for inferred RAMs
-		if (no_rw_check || lse)
-			no_rw_check_opt = " -no-rw-check";
-		if (help_mode)
-			no_rw_check_opt = " [-no-rw-check]";
+		std::string no_rw_check_opt = " -no-rw-check";
 
 		if (check_label("begin"))
 		{
 			run("read_verilog " + define + " -lib -specify +/ice40/cells_sim.v");
 			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt));
 			run("proc -latches " + (latches == "info" ? std::string("info") : std::string("warn")));
+			// identical drivers of one net (e.g. a duplicated assign) are one driver, as for LSE
+			run("opt_merge");
 		}
 
 		if (check_label("flatten", "(unless -noflatten)"))
@@ -326,32 +292,23 @@ struct SynthIce40Pass : public ScriptPass
 
 		if (check_label("coarse"))
 		{
-			if (lse || help_mode) {
-				run("ice40_lseconst", "                (if -lse)");
-				run("ice40_lseaddenable", "            (if -lse)");
-			}
-			// experiment hooks: scratchpad synth_ice40.lse.coarse / .luts hold extra commands
-			if (lse && active_design && active_design->scratchpad.count("synth_ice40.lse.coarse"))
-				for (auto &cmd : split_tokens(active_design->scratchpad_get_string("synth_ice40.lse.coarse"), "|"))
-					run(cmd);
+			run("ice40_lseconst");
+			run("ice40_lseaddenable");
 			run("opt_expr");
 			run("opt_clean");
 			run("check");
 			run("opt -nodffe -nosdff");
-			run(lse ? "fsm -lse" : "fsm", "(-lse with -lse)");
-			if (lse || help_mode) {
-				// LSE builds case statements as binary mux trees on the select bits
-				// (after fsm, which needs the original $pmux structure)
-				run("pmux2shiftx", "                   (if -lse)");
-				run("pmuxtree", "                      (if -lse)");
-			}
+			run("fsm -lse");
+			// LSE builds case statements as binary mux trees on the select bits
+			// (after fsm, which needs the original $pmux structure)
+			run("pmux2shiftx");
+			run("pmuxtree");
 			run("opt");
 			run("wreduce");
 			run("peepopt");
 			run("opt_clean");
 			run("share");
-			if (lse || help_mode)
-				run("ice40_lsecmp", "                  (if -lse)");
+			run("ice40_lsecmp");
 			run("techmap -map +/cmp2lut.v -D LUT_WIDTH=4");
 			run("opt_expr");
 			run("opt_clean");
@@ -366,15 +323,15 @@ struct SynthIce40Pass : public ScriptPass
 				run("opt_expr -fine", "                (if -dsp)");
 				run("wreduce", "                       (if -dsp)");
 				run("select -clear", "                 (if -dsp)");
-				run(lse ? (dsp_absorb_regs ? "ice40_dsp -lse -absorb_regs" : "ice40_dsp -lse") : "ice40_dsp",
-						"                     (if -dsp; -lse with -lse)");
+				run("ice40_dsp", "                     (if -dsp)");
 				run("chtype -set $mul t:$__soft_mul", "(if -dsp)");
 			}
 			run("alumacc");
 			// LSE adds several operands with a chain of two-input carry adders, not a
 			// carry-save tree
-			if (lse || help_mode)
-				run("maccmap -unmap; techmap -max_iter 1 -map +/techmap.v t:$add t:$sub; opt_clean", "(if -lse)");
+			run("maccmap -unmap");
+			run("techmap -max_iter 1 -map +/techmap.v t:$add t:$sub");
+			run("opt_clean");
 			run("opt");
 			run("memory -nomap" + no_rw_check_opt);
 			run("opt_clean");
@@ -392,7 +349,7 @@ struct SynthIce40Pass : public ScriptPass
 					args += " -no-auto-block";
 			}
 			run("memory_libmap -lib +/ice40/brams.txt -lib +/ice40/spram.txt" + args, "(-no-auto-huge unless -spram, -no-auto-block if -nobram)");
-			run("techmap -map +/ice40/brams_map.v -map +/ice40/spram_map.v");
+			run("techmap -D LSE -map +/ice40/brams_map.v -map +/ice40/spram_map.v");
 			run("ice40_braminit");
 		}
 
@@ -405,14 +362,12 @@ struct SynthIce40Pass : public ScriptPass
 
 		if (check_label("map_gates"))
 		{
-			if (lse || help_mode)
-				run("ice40_lsealu", "                  (if -lse)");
+			run("ice40_lsealu");
 			if (nocarry)
 				run("techmap");
 			else {
 				run("ice40_wrapcarry");
-				run(lse ? "techmap -D LSE -map +/techmap.v -map +/ice40/arith_map.v" : "techmap -map +/techmap.v -map +/ice40/arith_map.v",
-						"(-D LSE if -lse)");
+				run("techmap -D LSE -map +/techmap.v -map +/ice40/arith_map.v");
 			}
 			run("opt -fast");
 			run("ice40_opt");
@@ -428,8 +383,7 @@ struct SynthIce40Pass : public ScriptPass
 			run("opt_expr -mux_undef");
 			run("simplemap");
 			run("ice40_opt -full");
-			if (lse || help_mode)
-				run("ice40_lseramce", "               (if -lse)");
+			run("ice40_lseramce");
 		}
 
 		if (check_label("map_luts"))
@@ -442,47 +396,18 @@ struct SynthIce40Pass : public ScriptPass
 				if (noabc || help_mode)
 					run("techmap -map +/gate2lut.v -D LUT_WIDTH=4", "(only if -noabc)");
 			}
-			if (lse || help_mode) {
+			if (!noabc || help_mode) {
 				// LSE builds 4:1 multiplexers from two LUT4s
-				std::string mc = "muxcover -mux4=300";  // only complete 4:1 trees, as LSE
-				if (active_design && active_design->scratchpad.count("synth_ice40.lse.muxcover"))
-					mc = active_design->scratchpad_get_string("synth_ice40.lse.muxcover");
-				run(mc, "                (if -lse)");
-				run("techmap -map +/ice40/lse_mux_map.v", "(if -lse)");
-			}
-			if (lse && active_design && active_design->scratchpad.count("synth_ice40.lse.luts"))
-				for (auto &cmd : split_tokens(active_design->scratchpad_get_string("synth_ice40.lse.luts"), "|"))
-					run(cmd);
-			if (!noabc && (lse || help_mode)) {
-				// scratchpad synth_ice40.lse.abc overrides the ABC script (for experiments)
-				std::string script = "+strash;dch,-f;if,-K,4,-F,0,-A,0;mfs2";
-				if (active_design && active_design->scratchpad.count("synth_ice40.lse.abc"))
-					script = active_design->scratchpad_get_string("synth_ice40.lse.abc");
-				run("abc -lut 4 -script " + script, "(if -lse)");
-			}
-			if (!noabc && !lse) {
-				run("read_verilog " + define + " -icells -lib -specify +/ice40/abc9_model.v");
-				std::string abc9_opts;
-				std::string k = "synth_ice40.abc9.W";
-				if (active_design && active_design->scratchpad.count(k))
-					abc9_opts += stringf(" -W %s", active_design->scratchpad_get_string(k));
-				else {
-					k = stringf("synth_ice40.abc9.%s.W", device_opt);
-					abc9_opts += stringf(" -W %s", RTLIL::constpad.at(k));
-				}
-				if (dff)
-					abc9_opts += " -dff";
-				run("abc9 " + abc9_opts);
+				run("muxcover -mux4=300", "                (unless -noabc)");
+				run("techmap -map +/ice40/lse_mux_map.v", "(unless -noabc)");
+				// LSE duplicates small logic into its readers rather than sharing it, so
+				// no area recovery
+				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs2", "(unless -noabc)");
 			}
 			run("ice40_wrapcarry -unwrap");
 			run("techmap -map +/ice40/ff_map.v");
 			run("clean");
-			if (lse && active_design && active_design->scratchpad.count("synth_ice40.lse.post"))
-				for (auto &cmd : split_tokens(active_design->scratchpad_get_string("synth_ice40.lse.post"), "|"))
-					run(cmd);
-			// LSE never merges other logic into a carry LC's LUT
-			if (!lse || help_mode)
-				run("opt_lut -tech ice40", "(skip if -lse)");
+			// no opt_lut: LSE never merges other logic into a carry LC's LUT
 		}
 
 		if (check_label("map_cells"))
@@ -494,17 +419,11 @@ struct SynthIce40Pass : public ScriptPass
 			run("clean");
 		}
 
-		if (check_label("lse_polarity", "(if -lse)"))
-		{
-			if (lse || help_mode)
-				run("ice40_lsepolarity", "(if -lse)");
-		}
+		if (check_label("polarity"))
+			run("ice40_lsepolarity");
 
-		if (check_label("map_iopads", "(if -lse)"))
-		{
-			if (lse || help_mode)
-				run("ice40_iopack -lse");
-		}
+		if (check_label("map_iopads"))
+			run("ice40_iopack");
 
 		if (check_label("check"))
 		{

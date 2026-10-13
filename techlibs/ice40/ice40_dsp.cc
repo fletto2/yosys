@@ -27,7 +27,7 @@ PRIVATE_NAMESPACE_BEGIN
 
 // -lse: map like Lattice LSE (registers stay in the fabric, narrow products use the
 // 8x8 multipliers, an unused post-adder keeps its configuration at zero)
-static bool lse_mode, absorb_regs;
+static bool absorb_regs;
 
 void create_ice40_dsp(ice40_dsp_pm &pm)
 {
@@ -290,7 +290,7 @@ void create_ice40_dsp(ice40_dsp_pm &pm)
 		cell->setParam(ID(BOTOUTPUT_SELECT), Const(st.add ? 0 : 3, 2));
 	}
 
-	if (lse_mode && !st.add) {
+	if (!st.add) {
 		for (auto p : {ID(TOPADDSUB_LOWERINPUT), ID(TOPADDSUB_CARRYSELECT), ID(BOTADDSUB_LOWERINPUT), ID(BOTADDSUB_CARRYSELECT)})
 			cell->setParam(p, Const(0, 2));
 		cell->setParam(ID(TOPADDSUB_UPPERINPUT), State::S0);
@@ -330,13 +330,12 @@ struct Ice40DspPass : public Pass {
 		log("input will be folded into the DSP. In this scenario only, resetting the\n");
 		log("the accumulator to an arbitrary value can be inferred to use the {C,D} input.\n");
 		log("\n");
-		log("    -lse\n");
-		log("        map the way Lattice LSE does: leave all registers in the fabric, use\n");
-		log("        the 8x8 mode for products of two operands of at most 8 bits, and keep\n");
-		log("        an unused post-adder's configuration at zero.\n");
+		log("As Lattice LSE does, registers stay in the fabric unless -absorb_regs is\n");
+		log("given, products of two operands of at most 8 bits use the 8x8 mode, and an\n");
+		log("unused post-adder's configuration is left at zero.\n");
 		log("\n");
 		log("    -absorb_regs\n");
-		log("        with -lse, still pack registers into the DSP (saves fabric LCs).\n");
+		log("        pack registers into the DSP as described above (saves fabric LCs).\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -346,10 +345,6 @@ struct Ice40DspPass : public Pass {
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
 		{
-			if (args[argidx] == "-lse") {
-				lse_mode = true;
-				continue;
-			}
 			if (args[argidx] == "-absorb_regs") {
 				absorb_regs = true;
 				continue;
@@ -360,10 +355,10 @@ struct Ice40DspPass : public Pass {
 
 		for (auto module : design->selected_modules()) {
 			ice40_dsp_pm pm(module, module->selected_cells());
-			pm.ud_ice40_dsp.keep_regs = lse_mode && !absorb_regs;
+			pm.ud_ice40_dsp.keep_regs = !absorb_regs;
 			pm.run_ice40_dsp(create_ice40_dsp);
 		}
-		lse_mode = absorb_regs = false;
+		absorb_regs = false;
 	}
 } Ice40DspPass;
 
