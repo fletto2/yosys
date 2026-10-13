@@ -331,8 +331,9 @@ struct Ice40DspPass : public Pass {
 		log("the accumulator to an arbitrary value can be inferred to use the {C,D} input.\n");
 		log("\n");
 		log("As Lattice LSE does, registers stay in the fabric unless -absorb_regs is\n");
-		log("given, products of two operands of at most 8 bits use the 8x8 mode, and an\n");
-		log("unused post-adder's configuration is left at zero.\n");
+		log("given, an addition after the product stays in the fabric too, products of two\n");
+		log("operands of at most 8 bits use the 8x8 mode, and the unused post-adder's\n");
+		log("configuration is left at zero.\n");
 		log("\n");
 		log("    -absorb_regs\n");
 		log("        pack registers into the DSP as described above (saves fabric LCs).\n");
@@ -356,6 +357,8 @@ struct Ice40DspPass : public Pass {
 		for (auto module : design->selected_modules()) {
 			ice40_dsp_pm pm(module, module->selected_cells());
 			pm.ud_ice40_dsp.keep_regs = !absorb_regs;
+			// LSE leaves an addition after a product in the fabric
+			pm.ud_ice40_dsp.no_add = true;
 			pm.run_ice40_dsp(create_ice40_dsp);
 		}
 		absorb_regs = false;

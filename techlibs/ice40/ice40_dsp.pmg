@@ -18,6 +18,7 @@ udata <Cell*> dff
 udata <bool> dffclock_pol
 // -lse: leave every register in the fabric, as Lattice LSE does
 udata <bool> keep_regs
+udata <bool> no_add
 
 match mul
 	select mul->type.in($mul, \SB_MAC16)
@@ -184,6 +185,7 @@ match add
 	if mul->type != \SB_MAC16 || (param(mul, \TOPOUTPUT_SELECT).as_int() == 3 && param(mul, \BOTOUTPUT_SELECT).as_int() == 3)
 
 	select add->type.in($add)
+	filter !no_add
 	choice <IdString> AB {\A, \B}
 	select nusers(port(add, AB)) == 2
 
