@@ -17,6 +17,7 @@
 
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
+#include <functional>
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -453,7 +454,7 @@ struct Ice40LseRamCePass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    ice40_lseramce\n");
+		log("    ice40_lseramce [-absorb]\n");
 		log("\n");
 		log("LSE (area goal) does not give a flip-flop a clock enable when its D comes straight\n");
 		log("from an SPRAM or EBR read port and its output is read by other logic (one that\n");
@@ -462,10 +463,15 @@ struct Ice40LseRamCePass : public Pass {
 		log("muxes of RAM data and module ports.\n");
 		log("Run after the flip-flops are mapped to SB_DFF* cells.\n");
 		log("\n");
+		log("    -absorb\n");
+		log("        when the enable comes from a 2-input gate, build that gate and the hold\n");
+		log("        mux in one LUT (LSE does this only sometimes).\n");
+		log("\n");
 	}
 
 	typedef std::pair<IdString, IdString> RamId;	// (module, cell)
 	Design *design;
+	bool absorb;
 	dict<IdString, dict<SigBit, pool<RamId>>> ram_bits;	// per module: bit -> RAMs whose read data it is
 	dict<IdString, dict<std::pair<IdString, int>, pool<RamId>>> in_ram, out_ram;	// port bit -> RAMs
 	dict<IdString, std::vector<std::pair<Module*, Cell*>>> parents;
@@ -540,7 +546,13 @@ struct Ice40LseRamCePass : public Pass {
 	void execute(std::vector<std::string> args, RTLIL::Design *d) override
 	{
 		design = d;
-		extra_args(args, 1, design);
+		absorb = false;
+		size_t argidx;
+		for (argidx = 1; argidx < args.size(); argidx++) {
+			if (args[argidx] == "-absorb") { absorb = true; continue; }
+			break;
+		}
+		extra_args(args, argidx, design);
 		log_header(design, "Executing ICE40_LSERAMCE pass.\n");
 		ram_bits.clear(); in_ram.clear(); out_ram.clear(); parents.clear();
 
@@ -613,10 +625,38 @@ struct Ice40LseRamCePass : public Pass {
 				if (bits.count(db) && used_internally(module, cell->getPort(ID::Q).as_bit()))
 					todo.push_back(cell);
 			}
+			dict<SigBit, Cell*> gate_of;
+			for (auto c : module->cells())
+				if (c->type.in(ID($_AND_), ID($_OR_), ID($_ANDNOT_), ID($_ORNOT_), ID($_NAND_), ID($_NOR_)))
+					gate_of[sigmap(c->getPort(ID::Y).as_bit())] = c;
 			for (auto cell : todo) {
 				SigBit q = cell->getPort(ID::Q).as_bit(), dd = cell->getPort(ID::D).as_bit(), e = cell->getPort(ID::E).as_bit();
 				SigBit nd = module->addWire(NEW_ID);
-				module->addMuxGate(NEW_ID, q, dd, e, nd);
+				SigBit es = sigmap(e);
+				if (absorb && gate_of.count(es)) {
+					// LSE builds the hold mux and the last gate of the enable in one LUT
+					Cell *g = gate_of.at(es);
+					IdString t = g->type;
+					Const init(State::S0, 16);
+					for (int i = 0; i < 16; i++) {
+						bool vq = i & 1, vd = i & 2, x = i & 4, y = i & 8, sel;
+						if (t == ID($_AND_)) sel = x && y;
+						else if (t == ID($_OR_)) sel = x || y;
+						else if (t == ID($_ANDNOT_)) sel = x && !y;
+						else if (t == ID($_ORNOT_)) sel = x || !y;
+						else if (t == ID($_NAND_)) sel = !(x && y);
+						else sel = !(x || y);
+						init.set(i, (sel ? vd : vq) ? State::S1 : State::S0);
+					}
+					Cell *l = module->addCell(NEW_ID, ID(SB_LUT4));
+					l->setParam(ID(LUT_INIT), init);
+					l->setPort(ID(I0), q);
+					l->setPort(ID(I1), dd);
+					l->setPort(ID(I2), g->getPort(ID::A));
+					l->setPort(ID(I3), g->getPort(ID::B));
+					l->setPort(ID::O, nd);
+				} else
+					module->addMuxGate(NEW_ID, q, dd, e, nd);
 				cell->unsetPort(ID::E);
 				cell->setPort(ID::D, nd);
 				cell->type = noen.at(cell->type);
@@ -874,5 +914,151 @@ struct Ice40LsePolarityPass : public Pass {
 		}
 	}
 } Ice40LsePolarityPass;
+
+struct Ice40LseCmpPass : public Pass {
+	Ice40LseCmpPass() : Pass("ice40_lsecmp", "build comparisons of two signals as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsecmp [selection]\n");
+		log("\n");
+		log("Replaces $eq/$ne and unsigned $lt/$le/$gt/$ge of two non-constant operands (at\n");
+		log("least 3 bits) by the SB_LUT4 structures LSE builds:\n");
+		log("\n");
+		log("    - equality: one LUT per bit pair that is 1 when the pair differs, OR4\n");
+		log("      trees over those, and a final NOR ($eq) or OR ($ne)\n");
+		log("    - magnitude: a ripple chain from the low bits, the first LUT taking two\n");
+		log("      bits and every other one bit and the chain\n");
+		log("\n");
+	}
+	Module *module;
+	int count_luts;
+
+	// a LUT computing f over up to 4 inputs
+	SigBit lut(std::vector<SigBit> in, std::function<bool(const std::vector<bool>&)> f)
+	{
+		int n = GetSize(in);
+		Const init(State::S0, 16);
+		for (int i = 0; i < 16; i++) {
+			std::vector<bool> v;
+			for (int k = 0; k < n; k++)
+				v.push_back((i >> k) & 1);
+			init.set(i, f(v) ? State::S1 : State::S0);
+		}
+		SigBit y = module->addWire(NEW_ID);
+		Cell *c = module->addCell(NEW_ID, ID(SB_LUT4));
+		c->setParam(ID(LUT_INIT), init);
+		IdString pins[4] = {ID(I0), ID(I1), ID(I2), ID(I3)};
+		for (int k = 0; k < 4; k++)
+			c->setPort(pins[k], k < n ? SigSpec(in[k]) : SigSpec(State::S0));
+		c->setPort(ID::O, y);
+		c->set_bool_attribute(ID(lse_fixed));
+		count_luts++;
+		return y;
+	}
+
+	SigBit equality(SigSpec a, SigSpec b, bool ne)
+	{
+		std::vector<SigBit> diff;
+		int n = GetSize(a), i = 0;
+		for (; i + 1 < n; i += 2)
+			diff.push_back(lut({a[i], a[i+1], b[i], b[i+1]}, [](const std::vector<bool> &v) {
+				return (v[0] != v[2]) || (v[1] != v[3]);
+			}));
+		if (i < n)
+			diff.push_back(lut({a[i], b[i]}, [](const std::vector<bool> &v) { return v[0] != v[1]; }));
+		while (GetSize(diff) > 4) {
+			std::vector<SigBit> next;
+			for (int k = 0; k < GetSize(diff); k += 4) {
+				std::vector<SigBit> grp(diff.begin() + k, diff.begin() + std::min(k + 4, GetSize(diff)));
+				if (GetSize(grp) == 1)
+					next.push_back(grp[0]);
+				else
+					next.push_back(lut(grp, [](const std::vector<bool> &v) {
+						for (bool x : v) if (x) return true;
+						return false;
+					}));
+			}
+			diff = next;
+		}
+		// the last stage stays plain logic: LSE merges it into whatever reads it
+		SigBit any = module->ReduceOr(NEW_ID, diff);
+		return ne ? any : module->LogicNot(NEW_ID, any).as_bit();
+	}
+
+	// a < b (or a <= b with or_equal), unsigned, rippled from bit 0
+	SigBit less(SigSpec a, SigSpec b, bool or_equal)
+	{
+		int n = GetSize(a);
+		bool init = or_equal;
+		SigBit c = lut({b[0], b[1], a[1], a[0]}, [init](const std::vector<bool> &v) {
+			bool b0 = v[0], b1 = v[1], a1 = v[2], a0 = v[3];
+			bool l0 = (!a0 && b0) || (a0 == b0 && init);
+			return (!a1 && b1) || (a1 == b1 && l0);
+		});
+		for (int i = 2; i < n; i++)
+			c = lut({c, b[i], a[i]}, [](const std::vector<bool> &v) {
+				return (!v[2] && v[1]) || (v[2] == v[1] && v[0]);
+			});
+		return c;
+	}
+
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSECMP pass.\n");
+		for (auto m : design->selected_modules()) {
+			module = m;
+			count_luts = 0;
+			SigMap sigmap(module);
+			std::vector<Cell*> todo;
+			for (auto cell : module->selected_cells())
+				if (cell->type.in(ID($eq), ID($ne), ID($lt), ID($le), ID($gt), ID($ge)))
+					todo.push_back(cell);
+			// an operand that is a constant plus a small signal is mostly constant: LSE
+			// simplifies those, leave them to ABC
+			pool<SigBit> const_offset;
+			for (auto cell : module->cells())
+				if (cell->type.in(ID($add), ID($sub)) &&
+						(cell->getPort(ID::A).is_fully_const() || cell->getPort(ID::B).is_fully_const() ||
+						 GetSize(sigmap(cell->getPort(ID::A)).to_sigbit_pool()) <= 2 || GetSize(sigmap(cell->getPort(ID::B)).to_sigbit_pool()) <= 2))
+					for (auto bit : sigmap(cell->getPort(ID::Y)))
+						const_offset.insert(bit);
+			int count = 0;
+			for (auto cell : todo) {
+				bool is_signed = cell->getParam(ID::A_SIGNED).as_bool() && cell->getParam(ID::B_SIGNED).as_bool();
+				bool eq = cell->type.in(ID($eq), ID($ne));
+				if (is_signed && !eq)
+					continue;
+				int w = std::max(GetSize(cell->getPort(ID::A)), GetSize(cell->getPort(ID::B)));
+				SigSpec a = sigmap(cell->getPort(ID::A)), b = sigmap(cell->getPort(ID::B));
+				if (w < 3 || a.has_const() || b.has_const())
+					continue;
+				bool offset = false;
+				for (auto bit : a) if (const_offset.count(bit)) offset = true;
+				for (auto bit : b) if (const_offset.count(bit)) offset = true;
+				if (offset)
+					continue;
+				a.extend_u0(w, is_signed);
+				b.extend_u0(w, is_signed);
+				SigBit r;
+				if (eq)
+					r = equality(a, b, cell->type == ID($ne));
+				else if (cell->type == ID($lt)) r = less(a, b, false);
+				else if (cell->type == ID($le)) r = less(a, b, true);
+				else if (cell->type == ID($gt)) r = less(b, a, false);
+				else r = less(b, a, true);
+				SigSpec y = cell->getPort(ID::Y);
+				SigSpec ry(r);
+				ry.extend_u0(GetSize(y));
+				module->connect(y, ry);
+				module->remove(cell);
+				count++;
+			}
+			log("%s: %d comparisons built as %d LUTs.\n", log_id(module), count, count_luts);
+		}
+	}
+} Ice40LseCmpPass;
 
 PRIVATE_NAMESPACE_END

@@ -327,6 +327,7 @@ struct SynthIce40Pass : public ScriptPass
 		if (check_label("coarse"))
 		{
 			if (lse || help_mode) {
+				run("ice40_lseconst", "                (if -lse)");
 				run("ice40_lseaddenable", "            (if -lse)");
 			}
 			// experiment hooks: scratchpad synth_ice40.lse.coarse / .luts hold extra commands
@@ -349,6 +350,8 @@ struct SynthIce40Pass : public ScriptPass
 			run("peepopt");
 			run("opt_clean");
 			run("share");
+			if (lse || help_mode)
+				run("ice40_lsecmp", "                  (if -lse)");
 			run("techmap -map +/cmp2lut.v -D LUT_WIDTH=4");
 			run("opt_expr");
 			run("opt_clean");
@@ -368,6 +371,10 @@ struct SynthIce40Pass : public ScriptPass
 				run("chtype -set $mul t:$__soft_mul", "(if -dsp)");
 			}
 			run("alumacc");
+			// LSE adds several operands with a chain of two-input carry adders, not a
+			// carry-save tree
+			if (lse || help_mode)
+				run("maccmap -unmap; techmap -max_iter 1 -map +/techmap.v t:$add t:$sub; opt_clean", "(if -lse)");
 			run("opt");
 			run("memory -nomap" + no_rw_check_opt);
 			run("opt_clean");
@@ -423,8 +430,6 @@ struct SynthIce40Pass : public ScriptPass
 			run("ice40_opt -full");
 			if (lse || help_mode)
 				run("ice40_lseramce", "               (if -lse)");
-			if ((lse && active_design && active_design->scratchpad_get_bool("synth_ice40.lse.const")) || help_mode)
-				run("ice40_lseconst; opt_dff; opt_clean", "(if -lse)");
 		}
 
 		if (check_label("map_luts"))
@@ -450,7 +455,7 @@ struct SynthIce40Pass : public ScriptPass
 					run(cmd);
 			if (!noabc && (lse || help_mode)) {
 				// scratchpad synth_ice40.lse.abc overrides the ABC script (for experiments)
-				std::string script = "+strash;dch,-f;if,-K,4;mfs2;lutpack";
+				std::string script = "+strash;dch,-f;if,-K,4,-F,0,-A,0;mfs2";
 				if (active_design && active_design->scratchpad.count("synth_ice40.lse.abc"))
 					script = active_design->scratchpad_get_string("synth_ice40.lse.abc");
 				run("abc -lut 4 -script " + script, "(if -lse)");
