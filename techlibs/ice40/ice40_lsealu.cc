@@ -796,9 +796,6 @@ struct Ice40LsePolarityPass : public Pass {
 						else other_users.insert(b);
 					}
 				}
-			for (auto conn : module->connections())
-				for (auto b : sigmap(conn.second))
-					other_users.insert(b);
 			auto init_of = [](Cell *c) { Const v = c->getParam(ID(LUT_INIT)); v.extu(16); return v; };
 			// the sum LUT of a carry chain keeps its polarity (LSE never inverts an adder's sum)
 			pool<SigBit> carry_nets;
