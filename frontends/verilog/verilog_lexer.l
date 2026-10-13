@@ -604,6 +604,25 @@ supply1 { return parser::make_TOK_SUPPLY1(out_loc); }
 	}
 	return parser::make_TOK_SYNOPSYS_PARALLEL_CASE(out_loc);
 }
+<SYNOPSYS_FLAGS>syn_[a-zA-Z0-9_]+([ \t]*=[ \t]*(\"[^"*]*\"|[a-zA-Z0-9_.]+))? {
+	std::string text = YYText();
+	ParseState::SynDirective d;
+	d.filename = out_loc.begin.filename;
+	d.line = out_loc.begin.line;
+	d.column = out_loc.begin.column;
+	auto eq = text.find('=');
+	d.name = text.substr(0, eq == std::string::npos ? text.size() : eq);
+	while (!d.name.empty() && (d.name.back() == ' ' || d.name.back() == '\t'))
+		d.name.pop_back();
+	if (eq != std::string::npos) {
+		d.value = text.substr(eq + 1);
+		d.value.erase(0, d.value.find_first_not_of(" \t"));
+		if (d.value.size() >= 2 && d.value.front() == '"' && d.value.back() == '"')
+			d.value = d.value.substr(1, d.value.size() - 2);
+	}
+	d.after_rparen = last_token_char == ')';
+	extra->syn_directives.push_back(d);
+}
 <SYNOPSYS_FLAGS>. /* ignore everything else */
 <SYNOPSYS_FLAGS>"*/" { BEGIN(0); }
 
@@ -621,10 +640,12 @@ import[ \t\r\n]+\"(DPI|DPI-C)\"[ \t\r\n]+function[ \t\r\n]+ {
 
 <IMPORT_DPI>";" {
 	BEGIN(0);
+	pending_char = *YYText();
 	return char_tok(*YYText(), out_loc);
 }
 
 <IMPORT_DPI>. {
+	pending_char = *YYText();
 	return char_tok(*YYText(), out_loc);
 }
 
@@ -709,7 +730,7 @@ import[ \t\r\n]+\"(DPI|DPI-C)\"[ \t\r\n]+function[ \t\r\n]+ {
 <INITIAL,BASED_CONST>\\[\r\n]		/* ignore continuation sequence */
 <INITIAL,BASED_CONST>"//"[^\r\n]*	/* ignore one-line comments */
 
-<INITIAL>. { return char_tok(*YYText(), out_loc); }
-<*>. { BEGIN(0); return char_tok(*YYText(), out_loc); }
+<INITIAL>. { pending_char = *YYText(); return char_tok(*YYText(), out_loc); }
+<*>. { BEGIN(0); pending_char = *YYText(); return char_tok(*YYText(), out_loc); }
 
 %%

@@ -16,6 +16,8 @@ udata <SigSpec> dffD dffQ
 udata <SigBit> dffclock
 udata <Cell*> dff
 udata <bool> dffclock_pol
+// -lse: leave every register in the fabric, as Lattice LSE does
+udata <bool> keep_regs
 
 match mul
 	select mul->type.in($mul, \SB_MAC16)
@@ -75,7 +77,7 @@ code sigA sigB sigH
 endcode
 
 code argQ ffA sigA clock clock_pol
-	if (mul->type != \SB_MAC16 || !param(mul, \A_REG).as_bool()) {
+	if (!keep_regs && (mul->type != \SB_MAC16 || !param(mul, \A_REG).as_bool())) {
 		argQ = sigA;
 		subpattern(in_dffe);
 		if (dff) {
@@ -88,7 +90,7 @@ code argQ ffA sigA clock clock_pol
 endcode
 
 code argQ ffB sigB clock clock_pol
-	if (mul->type != \SB_MAC16 || !param(mul, \B_REG).as_bool()) {
+	if (!keep_regs && (mul->type != \SB_MAC16 || !param(mul, \B_REG).as_bool())) {
 		argQ = sigB;
 		subpattern(in_dffe);
 		if (dff) {
@@ -101,7 +103,7 @@ code argQ ffB sigB clock clock_pol
 endcode
 
 code argD argSdff ffFJKG sigH clock clock_pol
-	if (nusers(sigH) == 2 &&
+	if (!keep_regs && nusers(sigH) == 2 &&
 			(mul->type != \SB_MAC16 ||
 			 (!param(mul, \TOP_8x8_MULT_REG).as_bool() && !param(mul, \BOT_8x8_MULT_REG).as_bool() && !param(mul, \PIPELINE_16x16_MULT_REG1).as_bool() && !param(mul, \PIPELINE_16x16_MULT_REG1).as_bool()))) {
 		argD = sigH;
@@ -227,11 +229,11 @@ code sigO
 endcode
 
 code argD argSdff ffO sigO sigCD clock clock_pol cd_signed o_lo
-	if (mul->type != \SB_MAC16 ||
+	if (!keep_regs && (mul->type != \SB_MAC16 ||
 			// Ensure that register is not already used
 			((param(mul, \TOPOUTPUT_SELECT).as_int() != 1 && param(mul, \BOTOUTPUT_SELECT).as_int() != 1) &&
 			 // Ensure that OLOADTOP/OLOADBOT is unused or zero
-			 (port(mul, \OLOADTOP, State::S0).is_fully_zero() && port(mul, \OLOADBOT, State::S0).is_fully_zero()))) {
+			 (port(mul, \OLOADTOP, State::S0).is_fully_zero() && port(mul, \OLOADBOT, State::S0).is_fully_zero())))) {
 
 		dff = nullptr;
 
@@ -279,7 +281,7 @@ code argD argSdff ffO sigO sigCD clock clock_pol cd_signed o_lo
 endcode
 
 code argQ ffCD sigCD clock clock_pol
-	if (!sigCD.empty() && sigCD != sigO &&
+	if (!keep_regs && !sigCD.empty() && sigCD != sigO &&
 			(mul->type != \SB_MAC16 || (!param(mul, \C_REG).as_bool() && !param(mul, \D_REG).as_bool()))) {
 		argQ = sigCD;
 		subpattern(in_dffe);

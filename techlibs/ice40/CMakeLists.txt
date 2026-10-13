@@ -1,6 +1,17 @@
 yosys_pass(ice40_braminit
 	ice40_braminit.cc
 )
+yosys_pass(ice40_lsealu
+	ice40_lsealu.cc
+	REQUIRES
+		techmap
+)
+yosys_pass(ice40_iopack
+	ice40_iopack.cc
+	REQUIRES
+		iopadmap
+		techmap
+)
 yosys_pass(ice40_opt
 	ice40_opt.cc
 	REQUIRES
@@ -28,6 +39,8 @@ yosys_pass(synth_ice40
 	synth_ice40.cc
 	REQUIRES
 		abc
+		ice40_iopack
+		ice40_lsealu
 		abc9
 		alumacc
 		autoname
@@ -81,4 +94,7 @@ yosys_pass(synth_ice40
 		spram_map.v
 		dsp_map.v
 		abc9_model.v
+		iopack_map.v
+		lse_mux_map.v
+		lse_mux2_map.v
 )

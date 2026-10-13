@@ -47,8 +47,22 @@ module _80_ice40_alu (A, B, CI, BI, X, Y, CO);
 	wire [Y_WIDTH-1:0] AA = A_buf;
 	(* force_downto *)
 	wire [Y_WIDTH-1:0] BB = BI ? ~B_buf : B_buf;
+	wire CI0;
+`ifdef LSE
+	// LSE starts every chain with an extra carry half cell, so a constant carry-in
+	// still reaches the low sum LUT as a carry net
+	parameter _TECHMAP_CONSTMSK_CI_ = 0;
+	parameter _TECHMAP_CONSTVAL_CI_ = 0;
+	generate if (_TECHMAP_CONSTMSK_CI_)
+		(* keep *) SB_CARRY carry_in (.I0(_TECHMAP_CONSTVAL_CI_ == 1'b1), .I1(_TECHMAP_CONSTVAL_CI_ == 1'b1), .CI(1'b0), .CO(CI0));
+	else
+		assign CI0 = CI;
+	endgenerate
+`else
+	assign CI0 = CI;
+`endif
 	(* force_downto *)
-	wire [Y_WIDTH-1:0] C = {CO, CI};
+	wire [Y_WIDTH-1:0] C = {CO, CI0};
 
 	genvar i;
 	generate for (i = 0; i < Y_WIDTH; i = i + 1) begin:slice

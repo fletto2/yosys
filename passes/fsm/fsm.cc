@@ -59,6 +59,9 @@ struct FsmPass : public Pass {
 		log("    -expand, -norecode, -export, -nomap\n");
 		log("        enable or disable passes as indicated above\n");
 		log("\n");
+		log("    -lse\n");
+		log("        passed through to fsm_detect pass\n");
+		log("\n");
 		log("    -fullexpand\n");
 		log("        call expand with -full option\n");
 		log("\n");
@@ -87,6 +90,7 @@ struct FsmPass : public Pass {
 		bool flag_export = false;
 		std::string fm_set_fsm_file_opt;
 		std::string encfile_opt;
+		std::string detect_opt;
 		std::string encoding_opt;
 
 		log_header(design, "Executing FSM pass (extract and optimize FSM).\n");
@@ -97,6 +101,10 @@ struct FsmPass : public Pass {
 			std::string arg = args[argidx];
 			if (arg == "-fm_set_fsm_file" && argidx+1 < args.size() && fm_set_fsm_file_opt.empty()) {
 				fm_set_fsm_file_opt = " -fm_set_fsm_file " + args[++argidx];
+				continue;
+			}
+			if (arg == "-lse") {
+				detect_opt = " -lse";
 				continue;
 			}
 			if (arg == "-encfile" && argidx+1 < args.size() && encfile_opt.empty()) {
@@ -136,7 +144,7 @@ struct FsmPass : public Pass {
 		extra_args(args, argidx, design);
 
 		if (!flag_nodetect)
-			Pass::call(design, "fsm_detect");
+			Pass::call(design, "fsm_detect" + detect_opt);
 		Pass::call(design, "fsm_extract");
 
 		Pass::call(design, "fsm_opt");

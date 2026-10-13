@@ -89,6 +89,16 @@
 			bool default_nettype_wire = true;
 			std::istream* lexin;
 
+			// Synplify/LSE `/* synthesis name = value */` directives, attached to the
+			// declaration they follow once the file is parsed
+			struct SynDirective {
+				std::shared_ptr<std::string> filename;
+				int line, column;
+				std::string name, value;
+				bool after_rparen;
+			};
+			std::vector<SynDirective> syn_directives;
+
 			AstNode* saveChild(std::unique_ptr<AstNode> child);
 			AstNode* pushChild(std::unique_ptr<AstNode> child);
 			void addWiretypeNode(std::string *name, AstNode* node);
@@ -138,7 +148,9 @@
 
 	// Silly little C adapter between C++ bison and C++ flex
 	auto frontend_verilog_yylex(YOSYS_NAMESPACE_PREFIX VERILOG_FRONTEND::VerilogLexer* lexer) {
-		return lexer->nextToken();
+		auto tok = lexer->nextToken();
+		lexer->note_token();
+		return tok;
 	}
 
 	#define SET_AST_NODE_LOC(WHICH, BEGIN, END) (WHICH)->location = location_range(BEGIN, END)

@@ -69,6 +69,76 @@ static void add_package_types(dict<std::string, AST::AstNode *> &user_types, std
 	}
 }
 
+// Synplify/LSE directives come in comments after what they qualify:
+//   module m(...) /* synthesis syn_hier = "hard" */;
+//   wire [7:0] w /* synthesis syn_keep = 1 */;
+// Attach each one to the net/memory declared on that line before it, or to the
+// module when it follows the port list's `)`, and add the native Yosys attribute
+// where one exists, so the rest of the flow honours what the vendor tools would.
+static void collect_decls(AST::AstNode *node, std::vector<AST::AstNode*> &out)
+{
+	for (auto &child : node->children) {
+		if (child->type == AST::AST_WIRE || child->type == AST::AST_MEMORY)
+			out.push_back(child.get());
+		else if (child->type == AST::AST_GENBLOCK || child->type == AST::AST_GENFOR || child->type == AST::AST_GENIF)
+			collect_decls(child.get(), out);
+	}
+}
+
+static void set_syn_attr(AST::AstNode *node, const std::string &name, const std::string &value)
+{
+	char *end = nullptr;
+	long n = value.empty() ? 1 : strtol(value.c_str(), &end, 10);
+	bool numeric = value.empty() || (end && *end == 0);
+	auto mk = [&](const std::string &v, bool num, long k) {
+		return num ? AST::AstNode::mkconst_int(node->location, k, false) : AST::AstNode::mkconst_str(node->location, v);
+	};
+	node->attributes[RTLIL::escape_id(name)] = mk(value, numeric, n);
+	if (name == "syn_hier" && (value == "hard" || value == "firm" || value == "fixed"))
+		node->attributes[ID::keep_hierarchy] = AST::AstNode::mkconst_int(node->location, 1, false);
+	else if ((name == "syn_keep" || name == "syn_preserve" || name == "syn_noprune") && numeric && n)
+		node->attributes[ID::keep] = AST::AstNode::mkconst_int(node->location, 1, false);
+	else if (name == "syn_ramstyle") {
+		if (value.find("no_rw_check") != std::string::npos)
+			node->attributes[ID::no_rw_check] = AST::AstNode::mkconst_int(node->location, 1, false);
+		std::string style = value.substr(0, value.find(','));
+		if (style != "no_rw_check")
+			node->attributes[ID::ram_style] = AST::AstNode::mkconst_str(node->location, style);
+	}
+}
+
+static void apply_syn_directives(AST::AstNode *design, const std::vector<ParseState::SynDirective> &dirs)
+{
+	for (auto &d : dirs) {
+		AST::AstNode *target = nullptr, *module = nullptr;
+		for (auto &mod : design->children) {
+			if (mod->type != AST::AST_MODULE || !mod->location.begin.filename || !d.filename ||
+					*mod->location.begin.filename != *d.filename ||
+					d.line < mod->location.begin.line || d.line > mod->location.end.line)
+				continue;
+			module = mod.get();
+			std::vector<AST::AstNode*> decls;
+			collect_decls(mod.get(), decls);
+			for (auto decl : decls) {
+				if (decl->location.begin.line != d.line || decl->location.begin.column >= d.column)
+					continue;
+				if (!target || decl->location.begin.column > target->location.begin.column)
+					target = decl;
+			}
+		}
+		// `) /* synthesis ... */` after the last port: the directive is the module's
+		if (target && d.after_rparen && target->port_id > 0)
+			target = nullptr;
+		if (!target)
+			target = module;
+		if (!target) {
+			log_warning("%s:%d: ignoring `/* synthesis %s */' outside a module.\n", d.filename ? d.filename->c_str() : "", d.line, d.name.c_str());
+			continue;
+		}
+		set_syn_attr(target, d.name, d.value);
+	}
+}
+
 struct VerilogFrontend : public Frontend {
 	VerilogFrontend() : Frontend("verilog", "read modules from Verilog file") { }
 	void help() override
@@ -174,6 +244,14 @@ struct VerilogFrontend : public Frontend {
 		log("    -nodpi\n");
 		log("        disable DPI-C support\n");
 		log("\n");
+		log("    -synattr\n");
+		log("        honour Synplify/LSE directives in comments, e.g.\n");
+		log("        `module m(...) /* synthesis syn_hier = \"hard\" */;' or\n");
+		log("        `wire w /* synthesis syn_keep = 1 */;'. Each becomes an attribute\n");
+		log("        of the module, net or memory it follows, and syn_hier=\"hard\",\n");
+		log("        syn_keep/syn_preserve and syn_ramstyle also set keep_hierarchy,\n");
+		log("        keep, ram_style and no_rw_check, as the vendor tools obey them.\n");
+		log("\n");
 		log("    -noblackbox\n");
 		log("        do not automatically add a (* blackbox *) attribute to an\n");
 		log("        empty module.\n");
@@ -265,6 +343,7 @@ struct VerilogFrontend : public Frontend {
 		bool flag_ppdump = false;
 		bool flag_nopp = false;
 		bool flag_nodpi = false;
+		bool flag_synattr = false;
 		bool flag_noopt = false;
 		bool flag_icells = false;
 		bool flag_pwires = false;
@@ -396,6 +475,10 @@ struct VerilogFrontend : public Frontend {
 			}
 			if (arg == "-nopp") {
 				flag_nopp = true;
+				continue;
+			}
+			if (arg == "-synattr") {
+				flag_synattr = true;
 				continue;
 			}
 			if (arg == "-nodpi") {
@@ -546,6 +629,9 @@ struct VerilogFrontend : public Frontend {
 		}
 		parser.parse();
 		// frontend_verilog_yyset_lineno(1);
+
+		if (flag_synattr)
+			apply_syn_directives(parse_state.current_ast, parse_state.syn_directives);
 
 		for (auto &child : parse_state.current_ast->children) {
 			if (child->type == AST::AST_MODULE)

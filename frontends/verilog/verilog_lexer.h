@@ -29,6 +29,11 @@ namespace VERILOG_FRONTEND {
 		parser::symbol_type nextToken();
 		// get rid of override virtual function warning
 		using FlexLexer::yylex;
+		// single-char text of the token most recently handed to the parser (0 if not one),
+		// so a `/* synthesis */` directive can tell a module header's `)` from a declaration
+		char last_token_char = 0;
+		char pending_char = 0;
+		void note_token() { last_token_char = pending_char; pending_char = 0; }
 		parser::symbol_type terminate() {
 			return parser::make_FRONTEND_VERILOG_YYEOF(out_loc);
 		}

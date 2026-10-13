@@ -25,6 +25,10 @@ PRIVATE_NAMESPACE_BEGIN
 
 #include "techlibs/ice40/ice40_dsp_pm.h"
 
+// -lse: map like Lattice LSE (registers stay in the fabric, narrow products use the
+// 8x8 multipliers, an unused post-adder keeps its configuration at zero)
+static bool lse_mode, absorb_regs;
+
 void create_ice40_dsp(ice40_dsp_pm &pm)
 {
 	auto &st = pm.st_ice40_dsp;
@@ -60,6 +64,25 @@ void create_ice40_dsp(ice40_dsp_pm &pm)
 	if (GetSize(st.sigH) > 32) {
 		log("  output (%s) is too large (%d > 32).\n", log_signal(st.sigH), GetSize(st.sigH));
 		return;
+	}
+
+	// A user-instantiated SB_MAC16 that already uses its adder/accumulator (or 8x8
+	// mode) must keep its configuration: only grow plain 16x16 multipliers.
+	if (st.mul->type == ID(SB_MAC16)) {
+		bool plain = st.mul->getParam(ID(TOPOUTPUT_SELECT)).as_int() == 3 &&
+				st.mul->getParam(ID(BOTOUTPUT_SELECT)).as_int() == 3 &&
+				!st.mul->getParam(ID(MODE_8x8)).as_bool();
+		for (auto port : {ID(OLOADTOP), ID(OLOADBOT), ID(OHOLDTOP), ID(OHOLDBOT), ID(ADDSUBTOP),
+				ID(ADDSUBBOT), ID(ORSTTOP), ID(ORSTBOT), ID(CI), ID(ACCUMCI)})
+			if (st.mul->hasPort(port)) {
+				SigSpec sig = pm.sigmap(st.mul->getPort(port));
+				if (!sig.is_fully_const() || sig.as_bool())
+					plain = false;
+			}
+		if (!plain) {
+			log("  %s is a configured SB_MAC16, leaving it unchanged.\n", log_id(st.mul));
+			return;
+		}
 	}
 
 	Cell *cell = st.mul;
@@ -267,6 +290,18 @@ void create_ice40_dsp(ice40_dsp_pm &pm)
 		cell->setParam(ID(BOTOUTPUT_SELECT), Const(st.add ? 0 : 3, 2));
 	}
 
+	if (lse_mode && !st.add) {
+		for (auto p : {ID(TOPADDSUB_LOWERINPUT), ID(TOPADDSUB_CARRYSELECT), ID(BOTADDSUB_LOWERINPUT), ID(BOTADDSUB_CARRYSELECT)})
+			cell->setParam(p, Const(0, 2));
+		cell->setParam(ID(TOPADDSUB_UPPERINPUT), State::S0);
+		cell->setParam(ID(BOTADDSUB_UPPERINPUT), State::S0);
+		if (!st.ffO && GetSize(st.sigA) <= 8 && GetSize(st.sigB) <= 8 && GetSize(st.sigH) <= 16) {
+			cell->setParam(ID(MODE_8x8), State::S1);
+			cell->setParam(ID(TOPOUTPUT_SELECT), Const(2, 2));
+			cell->setParam(ID(BOTOUTPUT_SELECT), Const(2, 2));
+		}
+	}
+
 	if (cell != st.mul)
 		pm.autoremove(st.mul);
 	else
@@ -295,6 +330,14 @@ struct Ice40DspPass : public Pass {
 		log("input will be folded into the DSP. In this scenario only, resetting the\n");
 		log("the accumulator to an arbitrary value can be inferred to use the {C,D} input.\n");
 		log("\n");
+		log("    -lse\n");
+		log("        map the way Lattice LSE does: leave all registers in the fabric, use\n");
+		log("        the 8x8 mode for products of two operands of at most 8 bits, and keep\n");
+		log("        an unused post-adder's configuration at zero.\n");
+		log("\n");
+		log("    -absorb_regs\n");
+		log("        with -lse, still pack registers into the DSP (saves fabric LCs).\n");
+		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
@@ -303,16 +346,24 @@ struct Ice40DspPass : public Pass {
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
 		{
-			// if (args[argidx] == "-singleton") {
-			// 	singleton_mode = true;
-			// 	continue;
-			// }
+			if (args[argidx] == "-lse") {
+				lse_mode = true;
+				continue;
+			}
+			if (args[argidx] == "-absorb_regs") {
+				absorb_regs = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
-		for (auto module : design->selected_modules())
-			ice40_dsp_pm(module, module->selected_cells()).run_ice40_dsp(create_ice40_dsp);
+		for (auto module : design->selected_modules()) {
+			ice40_dsp_pm pm(module, module->selected_cells());
+			pm.ud_ice40_dsp.keep_regs = lse_mode && !absorb_regs;
+			pm.run_ice40_dsp(create_ice40_dsp);
+		}
+		lse_mode = absorb_regs = false;
 	}
 } Ice40DspPass;
 

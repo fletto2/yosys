@@ -118,7 +118,61 @@ static bool check_state_users(RTLIL::SigSpec sig)
 	return true;
 }
 
-static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false)
+static bool depends_on(RTLIL::SigSpec sig, const pool<RTLIL::SigBit> &target, pool<RTLIL::SigBit> &seen, int depth)
+{
+	for (auto bit : assign_map(sig)) {
+		if (bit.wire == nullptr || seen.count(bit))
+			continue;
+		seen.insert(bit);
+		if (target.count(bit))
+			return true;
+		if (depth == 0)
+			continue;
+		std::set<sig2driver_entry_t> drivers;
+		sig2driver.find(bit, drivers);
+		for (auto &d : drivers) {
+			if (d.first->type.in(ID($dff), ID($adff), ID($dffe), ID($adffe), ID($sdff), ID($sdffe), ID($sdffce)))
+				continue;
+			for (auto &conn : d.first->connections())
+				if (d.first->input(conn.first) && depends_on(conn.second, target, seen, depth - 1))
+					return true;
+		}
+	}
+	return false;
+}
+
+// LSE only extracts a state machine when every next-state choice made outside the
+// case on the state register picks a constant: walking back from D, each mux whose
+// select does not depend on the state must have one constant data input.
+static bool lse_override_ok(RTLIL::SigSpec sig_q, RTLIL::SigSpec sig)
+{
+	pool<RTLIL::SigBit> q_bits = sig_q.to_sigbit_pool();
+	for (int guard = 0; guard < 64; guard++) {
+		sig = assign_map(sig);
+		if (sig.is_fully_const() || sig == sig_q)
+			return true;
+		std::set<sig2driver_entry_t> drivers;
+		sig2driver.find(sig, drivers);
+		if (drivers.size() != 1)
+			return true;
+		RTLIL::Cell *cell = drivers.begin()->first;
+		if (cell->type != ID($mux))
+			return true;
+		pool<RTLIL::SigBit> seen;
+		if (depends_on(cell->getPort(ID::S), q_bits, seen, 8))
+			return true;
+		RTLIL::SigSpec a = assign_map(cell->getPort(ID::A)), b = assign_map(cell->getPort(ID::B));
+		if (a.is_fully_const())
+			sig = b;
+		else if (b.is_fully_const())
+			sig = a;
+		else
+			return false;
+	}
+	return true;
+}
+
+static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false, bool lse=false)
 {
 	bool has_fsm_encoding_attr = wire->attributes.count(ID::fsm_encoding) > 0 && wire->attributes.at(ID::fsm_encoding).decode_string() != "none";
 	bool has_fsm_encoding_none = wire->attributes.count(ID::fsm_encoding) > 0 && wire->attributes.at(ID::fsm_encoding).decode_string() == "none";
@@ -156,7 +210,11 @@ static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false)
 			continue;
 
 		looks_like_state_reg = check_state_mux_tree(sig_q, sig_d, recursion_monitor, mux_tree_cache);
-		looks_like_good_state_reg = check_state_users(sig_q);
+		looks_like_good_state_reg = lse || check_state_users(sig_q);
+		if (lse && looks_like_state_reg && !lse_override_ok(sig_q, sig_d)) {
+			log("Not marking %s.%s as FSM state register: a next-state mux outside the state case has no constant input (LSE rule).\n", wire->module, wire);
+			return;
+		}
 
 		if (!looks_like_state_reg)
 			break;
@@ -277,6 +335,11 @@ struct FsmDetectPass : public Pass {
 		log("    -ignore-self-reset\n");
 		log("        Mark FSMs even if they are self-resetting\n");
 		log("\n");
+		log("    -lse\n");
+		log("        Follow Lattice LSE: skip the check that recoding benefits the state\n");
+		log("        register's users, and reject registers whose next-state value can be\n");
+		log("        chosen between two non-constant values outside the state decoding.\n");
+		log("\n");
 		log("Existing 'fsm_encoding' attributes are not changed by this pass.\n");
 		log("\n");
 		log("Signals can be protected from being detected by this pass by setting the\n");
@@ -296,13 +359,17 @@ struct FsmDetectPass : public Pass {
 	{
 		log_header(design, "Executing FSM_DETECT pass (finding FSMs in design).\n");
 
-		bool ignore_self_reset = false;
+		bool ignore_self_reset = false, lse = false;
 
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++)
 		{
 			if (args[argidx] == "-ignore-self-reset") {
 				ignore_self_reset = true;
+				continue;
+			}
+			if (args[argidx] == "-lse") {
+				lse = true;
 				continue;
 			}
 			break;
@@ -343,7 +410,7 @@ struct FsmDetectPass : public Pass {
 					sig_at_port.add(assign_map(wire));
 
 			for (auto wire : module->selected_wires())
-				detect_fsm(wire, ignore_self_reset);
+				detect_fsm(wire, ignore_self_reset, lse);
 		}
 
 		assign_map.clear();
