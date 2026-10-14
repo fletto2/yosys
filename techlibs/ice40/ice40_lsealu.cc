@@ -188,6 +188,28 @@ struct Ice40LseAddEnablePass : public Pass {
 						continue;
 					std::vector<SigSpec> todo = {sigmap(cell->getPort(ID::D))};
 					pool<SigSpec> seen;
+					// a clear anywhere in the tree (cond ? 0 : Q, an accumulator cleared in
+					// another case arm, psg left_accum_r) counts for every mux in it; a
+					// constant inside a load value (bitmap_mode ? 0 : start) does not
+					bool const_load = false;
+					{
+						std::vector<SigSpec> walk = {sigmap(cell->getPort(ID::D))};
+						pool<SigSpec> wseen;
+						while (!walk.empty() && GetSize(wseen) <= 16) {
+							SigSpec x = walk.back(); walk.pop_back();
+							if (!wseen.insert(x).second)
+								continue;
+							Cell *m = mux_of_y.count(x) ? mux_of_y.at(x) : (pmux_of_y.count(x) ? pmux_of_y.at(x) : nullptr);
+							if (m == nullptr)
+								continue;
+							SigSpec ma = sigmap(m->getPort(ID::A)), mb = sigmap(m->getPort(ID::B));
+							if (m->type == ID($mux) && ((ma.is_fully_def() && mb == q) || (mb.is_fully_def() && ma == q)))
+								const_load = true;
+							walk.push_back(ma);
+							for (int i = 0; i + GetSize(ma) <= GetSize(mb); i += GetSize(ma))
+								walk.push_back(mb.extract(i, GetSize(ma)));
+						}
+					}
 					while (!todo.empty()) {
 						SigSpec x = todo.back(); todo.pop_back();
 						if (seen.count(x) || GetSize(seen) > 16)
@@ -206,7 +228,7 @@ struct Ice40LseAddEnablePass : public Pass {
 								load = true;
 						for (auto &in : ins)
 							if (mux_of_y.count(in) || pmux_of_y.count(in)) {
-								if (load)
+								if (load || const_load)
 									behind_const.insert(in);
 								todo.push_back(in);
 							}
@@ -2289,7 +2311,8 @@ struct Ice40LseHoldSelPass : public Pass {
 						bool hb = walk(sigmap(m->getPort(ID::B)));
 						return ha || hb;
 					}
-					if (sig.is_fully_undef() || sig.is_fully_const()) {
+					// a constant word is fine (an accumulator cleared to 0), a don't-care is not
+					if (sig.is_fully_undef() || (sig.is_fully_const() && !sig.is_fully_def())) {
 						ok = false;
 						return false;
 					}
@@ -2307,6 +2330,9 @@ struct Ice40LseHoldSelPass : public Pass {
 				if (!ok || !hold_a || !hold_b || GetSize(words) != 2 || nb != 1 || rb == q || ra == q)
 					continue;
 				SigSpec w1 = words[0], w0 = words[1];
+				// a set/clear flag (two constant words) is left to the enable logic
+				if (w1.is_fully_const() && w0.is_fully_const())
+					continue;
 				// the tree one bit wide, with the given leaf values
 				std::function<SigBit(SigSpec, State, State, State)> bit_tree = [&](SigSpec sig, State v1, State v0, State vq) -> SigBit {
 					if (sig == q) return vq;
