@@ -276,6 +276,8 @@ struct SynthIce40Pass : public ScriptPass
 			run("read_verilog " + define + " -lib -specify +/ice40/cells_sim.v");
 			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt));
 			run("proc -latches " + (latches == "info" ? std::string("info") : std::string("warn")));
+			// before opt_merge shares a compared multiplexer with an identical one
+			run("ice40_lsemuxcmp");
 			// identical drivers of one net (e.g. a duplicated assign) are one driver, as for LSE
 			run("opt_merge");
 		}

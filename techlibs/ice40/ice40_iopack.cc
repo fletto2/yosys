@@ -154,9 +154,12 @@ struct Ice40IopackPass : public Pass {
 			n_out++;
 		}
 
+		// a flip-flop from an input pad straight to an output pad is already the
+		// output register
+		pool<Cell*> packed(remove.begin(), remove.end());
 		for (auto ff : module->selected_cells()) {
 			IdString t = ff->type;
-			if (!t.in(ID(SB_DFF), ID(SB_DFFN), ID(SB_DFFE), ID(SB_DFFNE)))
+			if (!t.in(ID(SB_DFF), ID(SB_DFFN), ID(SB_DFFE), ID(SB_DFFNE)) || packed.count(ff))
 				continue;
 			SigBit d = sigmap(ff->getPort(ID::D));
 			if (!port_bit.count(d))

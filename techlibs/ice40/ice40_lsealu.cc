@@ -1491,4 +1491,125 @@ struct Ice40LseReducePass : public Pass {
 	}
 } Ice40LseReducePass;
 
+struct Ice40LseMuxCmpPass : public Pass {
+	Ice40LseMuxCmpPass() : Pass("ice40_lsemuxcmp", "compare both inputs of a multiplexer instead of its output, as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsemuxcmp [selection]\n");
+		log("\n");
+		log("A $mux whose output is read only by comparisons against constants ($eq, $ne)\n");
+		log("and reductions ($reduce_or, $reduce_and, $reduce_bool, $logic_not) is removed:\n");
+		log("each of those cells is applied to both data inputs and the results are\n");
+		log("multiplexed instead. Compares that decode a case statement (select of a\n");
+		log("$pmux) do not count. Run right after proc.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEMUXCMP pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, std::vector<Cell*>> readers;
+			pool<SigBit> outside;
+			for (auto w : module->wires())
+				if (w->port_output || w->get_bool_attribute(ID::keep))
+					for (auto b : sigmap(SigSpec(w)))
+						outside.insert(b);
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->input(conn.first))
+						for (auto b : sigmap(conn.second))
+							readers[b].push_back(cell);
+			// case statement decoders (selects of a $pmux) stay with their case
+			pool<SigBit> pmux_sel;
+			for (auto cell : module->cells())
+				if (cell->type == ID($pmux))
+					for (auto b : sigmap(cell->getPort(ID::S)))
+						pmux_sel.insert(b);
+			auto is_cmp = [&](Cell *c) {
+				bool cmp = c->type.in(ID($reduce_or), ID($reduce_and), ID($reduce_bool), ID($logic_not)) ||
+						(c->type.in(ID($eq), ID($ne)) && (sigmap(c->getPort(ID::A)).is_fully_const() ||
+						sigmap(c->getPort(ID::B)).is_fully_const()));
+				if (!cmp)
+					return false;
+				for (auto b : sigmap(c->getPort(ID::Y)))
+					if (pmux_sel.count(b))
+						return false;
+				return true;
+			};
+			int count = 0;
+			std::vector<Cell*> muxes;
+			for (auto cell : module->selected_cells())
+				if (cell->type == ID($mux))
+					muxes.push_back(cell);
+			for (auto mux : muxes) {
+				SigSpec y = sigmap(mux->getPort(ID::Y));
+				pool<Cell*> users;
+				bool ok = true;
+				for (auto b : y) {
+					if (outside.count(b)) {
+						ok = false;
+						break;
+					}
+					if (!readers.count(b))
+						continue;
+					for (auto c : readers.at(b)) {
+						if (!is_cmp(c)) {
+							ok = false;
+							break;
+						}
+						users.insert(c);
+					}
+					if (!ok)
+						break;
+				}
+				if (!ok || users.empty())
+					continue;
+				SigSpec a = sigmap(mux->getPort(ID::A)), bb = sigmap(mux->getPort(ID::B));
+				SigBit sel = mux->getPort(ID::S).as_bit();
+				// a reader's operand bits, taken from one side of the multiplexer
+				auto side = [&](SigSpec sig, const SigSpec &from) {
+					SigSpec r = sigmap(sig);
+					for (int i = 0; i < GetSize(r); i++)
+						for (int k = 0; k < GetSize(y); k++)
+							if (r[i] == y[k]) {
+								r[i] = from[k];
+								break;
+							}
+					return r;
+				};
+				for (auto c : users) {
+					SigSpec cy = c->getPort(ID::Y);
+					Cell *ca = module->addCell(NEW_ID, c);
+					Cell *cb = module->addCell(NEW_ID, c);
+					for (auto port : {ID::A, ID::B})
+						if (c->hasPort(port)) {
+							ca->setPort(port, side(c->getPort(port), a));
+							cb->setPort(port, side(c->getPort(port), bb));
+						}
+					SigSpec ya = module->addWire(NEW_ID, GetSize(cy)), yb = module->addWire(NEW_ID, GetSize(cy));
+					ca->setPort(ID::Y, ya);
+					cb->setPort(ID::Y, yb);
+					module->remove(c);
+					module->addMux(NEW_ID, ya, yb, sel, cy);
+				}
+				log("  %s (%s)\n", log_id(mux), log_signal(mux->getPort(ID::Y)));
+				module->remove(mux);
+				count++;
+				// readers changed: rebuild before the next multiplexer
+				readers.clear();
+				for (auto cell : module->cells())
+					for (auto &conn : cell->connections())
+						if (cell->input(conn.first))
+							for (auto b : sigmap(conn.second))
+								readers[b].push_back(cell);
+			}
+			log("%s: %d multiplexers replaced by compares of both inputs.\n", log_id(module), count);
+		}
+	}
+} Ice40LseMuxCmpPass;
+
 PRIVATE_NAMESPACE_END
