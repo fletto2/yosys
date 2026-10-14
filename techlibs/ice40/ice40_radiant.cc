@@ -36,7 +36,8 @@ struct Ice40RadiantPass : public Pass {
 		log("  WARMBOOT, FILTER, PLL_B, I2C_B, SPI_B, MAC16, SP256K, VFB_B, EBR_B, PDP4K,\n");
 		log("  LUT4, FA2, CCU2_B, FD1P3XZ/BZ/DZ/IZ/JZ, IFD1P3AZ, OFD1P3AZ, INV, BUF,\n");
 		log("  VHI, VLO, BB_I3C\n");
-		log("The pad buffers IB, OB, OBZ_B, BB_B, BB_OD and OB_RGB become plain or tristate\n");
+		log("BB_B becomes an SB_IO (PIN_TYPE 101001). The pad buffers IB, OB, OBZ_B, BB_OD\n");
+		log("and OB_RGB become plain or tristate\n");
 		log("connections for iopadmap, IOL_B becomes flip-flops that ice40_iopack packs\n");
 		log("into the SB_IO (DDR output is not supported), PUR is dropped. The port\n");
 		log("declarations are in +/ice40/radiant_cells.v.\n");
@@ -212,7 +213,16 @@ struct Ice40RadiantPass : public Pass {
 				} else if (t == ID(OBZ_B)) {
 					// despite its name, T_N high drives the pad (Radiant's PIO model)
 					module->addTribuf(NEW_ID, port("I"), port("T_N"), port("O"));
-				} else if (t.in(ID(BB_B), ID(OB_RGB))) {
+				} else if (t == ID(BB_B)) {
+					// a bidirectional pad: an SB_IO of its own, so its input side reads the pad
+					// (a tristate driving the pad wire would alias O to the output after flatten)
+					make("SB_IO");
+					conn("PACKAGE_PIN", port("B")); conn("OUTPUT_ENABLE", port("T_N")); conn("D_OUT_0", port("I"));
+					conn("D_IN_0", port("O"));
+					n->setParam(ID(PIN_TYPE), Const(0b101001, 6));
+					n->setParam(ID(PULLUP), Const(0, 1));
+					n->setParam(ID(NEG_TRIGGER), Const(0, 1));
+				} else if (t == ID(OB_RGB)) {
 					module->addTribuf(NEW_ID, port("I"), port("T_N"), port("B"));
 					if (!port("O").empty())
 						module->connect(port("O"), port("B"));
