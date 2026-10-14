@@ -409,7 +409,10 @@ struct SynthIce40Pass : public ScriptPass
 				run("ice40_lsereduce", "                 (unless -noabc)");
 				run("techmap -map +/ice40/lse_mux_map.v", "(unless -noabc)");
 				// LSE duplicates small logic into its readers rather than sharing it, so
-				// no area recovery
+				// no area recovery. A kept net (syn_keep) is a LUT output for LSE: map
+				// the logic in front of it first, so the rest reads the net itself
+				run("select -set lse_keep w:* a:keep %i %cie* t:$_* %i", "(unless -noabc)");
+				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs2 @lse_keep", "(unless -noabc)");
 				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs2", "(unless -noabc)");
 			}
 			run("ice40_wrapcarry -unwrap");

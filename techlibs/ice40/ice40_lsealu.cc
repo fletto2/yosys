@@ -801,8 +801,9 @@ struct Ice40LsePolarityPass : public Pass {
 			SigMap sigmap(module);
 			dict<SigBit, std::vector<std::pair<Cell*, int>>> lut_users;
 			pool<SigBit> other_users;
+			// a kept net (syn_keep) keeps its value, as do ports
 			for (auto w : module->wires())
-				if (w->port_output)
+				if (w->port_output || w->get_bool_attribute(ID::keep))
 					for (auto b : sigmap(w))
 						other_users.insert(b);
 			for (auto cell : module->cells())
@@ -1209,6 +1210,7 @@ struct Ice40LseMuxSelPass : public Pass {
 		log("multiplexer LUTs and S = x op R for one of its inputs x (op an AND or OR, with\n");
 		log("either polarity), LSE builds R as the shared LUT and puts the gate with x into\n");
 		log("every multiplexer LUT. This pass does the same; the LUT count is unchanged.\n");
+		log("A select LUT of only two inputs goes whole into the multiplexer LUTs.\n");
 		log("An x driven by a flip-flop is preferred.\n");
 		log("\n");
 	}
@@ -1266,9 +1268,11 @@ struct Ice40LseMuxSelPass : public Pass {
 			for (auto cell : module->selected_cells())
 				if (cell->type == ID(SB_LUT4) && !cell->get_bool_attribute(ID(lse_fixed)))
 					luts.push_back(cell);
+			// nets newly wired into a multiplexer: their users are not in the map
+			pool<SigBit> rewired;
 			for (auto S : luts) {
 				SigBit so = sigmap(S->getPort(ID::O).as_bit());
-				if (port_bits.count(so) || !users.count(so))
+				if (port_bits.count(so) || !users.count(so) || rewired.count(so))
 					continue;
 				std::vector<std::tuple<Cell*, int, int, int>> muxes;
 				bool only_selects = true;
@@ -1278,7 +1282,7 @@ struct Ice40LseMuxSelPass : public Pass {
 							u.second != pins[sel]) { only_selects = false; break; }
 					muxes.push_back(std::make_tuple(u.first, sel, lo, hi));
 				}
-				if (!only_selects || GetSize(muxes) < 2)
+				if (!only_selects || muxes.empty())
 					continue;
 				std::vector<int> live;
 				int smask = 0;
@@ -1288,9 +1292,36 @@ struct Ice40LseMuxSelPass : public Pass {
 					if (pb.wire) { live.push_back(i); smask |= 1 << i; }
 					else if (pb.data != State::S0) tied1 = true;
 				}
-				if (GetSize(live) < 3 || tied1)
+				if (tied1)
 					continue;
 				int sinit = init_of(S);
+				// a select of two signals goes whole into every multiplexer LUT
+				if (GetSize(live) == 2) {
+					SigBit s0 = S->getPort(pins[live[0]]).as_bit(), s1 = S->getPort(pins[live[1]]).as_bit();
+					rewired.insert(sigmap(s0));
+					rewired.insert(sigmap(s1));
+					for (auto &m : muxes) {
+						Cell *M = std::get<0>(m);
+						int sel = std::get<1>(m), lo = std::get<2>(m), hi = std::get<3>(m);
+						int free = -1;
+						for (int i = 0; i < 4; i++)
+							if (i != sel && i != lo && i != hi) free = i;
+						M->setPort(pins[sel], s0);
+						M->setPort(pins[free], s1);
+						Const ninit(State::S0, 16);
+						for (int idx = 0; idx < 16; idx++) {
+							int sidx = (((idx >> sel) & 1) << live[0]) | (((idx >> free) & 1) << live[1]);
+							int v = bit(sinit, sidx) ? ((idx >> hi) & 1) : ((idx >> lo) & 1);
+							ninit.set(idx, v ? State::S1 : State::S0);
+						}
+						M->setParam(ID(LUT_INIT), ninit);
+					}
+					module->remove(S);
+					count++;
+					continue;
+				}
+				if (GetSize(live) < 3 || GetSize(muxes) < 2)
+					continue;
 				// find x and op with S = op(x ^ px, R)
 				int best_x = -1, best_op = -1, best_px = 0, best_score = -1;
 				for (int x : live)
@@ -1312,6 +1343,7 @@ struct Ice40LseMuxSelPass : public Pass {
 				// R: S with x at its non-dominating value
 				int nd = best_op == 0 ? !best_px : best_px;
 				SigBit xsig = S->getPort(pins[best_x]).as_bit();
+				rewired.insert(sigmap(xsig));
 				Const rinit(State::S0, 16);
 				for (int idx = 0; idx < 16; idx++) {
 					// R ignores the x pin (now tied to 0) and the unused pins
