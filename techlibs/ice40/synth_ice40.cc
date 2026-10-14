@@ -415,7 +415,7 @@ struct SynthIce40Pass : public ScriptPass
 				// no area recovery. A kept net (syn_keep) is a LUT output for LSE that
 				// the logic after it reads as is
 				run("ice40_lsecut -insert a:keep a:lse_cut %u", "(unless -noabc)");
-				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs2", "(unless -noabc)");
+				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0", "(unless -noabc)");
 				run("ice40_lsecut -remove", "           (unless -noabc)");
 			}
 			run("ice40_wrapcarry -unwrap");
