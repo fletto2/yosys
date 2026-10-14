@@ -414,7 +414,10 @@ struct Ice40RadiantPass : public Pass {
 					// power-up reset for simulation only; the device has none to configure
 				} else
 					continue;
+				IdString name = cell->name;
 				module->remove(cell);
+				if (n)
+					module->rename(n, name);
 				count++;
 			}
 			if (count)
