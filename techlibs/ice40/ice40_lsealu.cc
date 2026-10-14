@@ -2537,6 +2537,38 @@ struct Ice40LseCeCostPass : public Pass {
 				// logic behind an enable several flip-flops share is there anyway
 				int e_cost = GetSize(it.second) == 1 ? luts(e_logic, GetSize(e_leaves)) : 0;
 				for (auto ff : it.second) {
+					// D computed by logic other logic reads too, and that logic reads Q (an
+					// address bus that can repeat the last address): LSE puts the hold in a
+					// LUT of its own instead of using the enable
+					{
+						SigBit dd = sigmap(ff->getPort(ID::D)), qq = sigmap(ff->getPort(ID::Q));
+						Cell *dc = driver.count(dd) ? driver.at(dd) : nullptr;
+						if (gate(dc) && nreaders[dd] > 1) {
+							bool reads_q = false;
+							pool<Cell*> seen;
+							std::vector<Cell*> todo = {dc};
+							while (!todo.empty() && !reads_q && GetSize(seen) < 256) {
+								Cell *c = todo.back();
+								todo.pop_back();
+								if (!seen.insert(c).second)
+									continue;
+								for (auto &conn : c->connections())
+									if (c->input(conn.first))
+										for (auto b : sigmap(conn.second)) {
+											if (b == qq)
+												reads_q = true;
+											Cell *x = driver.count(b) ? driver.at(b) : nullptr;
+											if (gate(x))
+												todo.push_back(x);
+										}
+							}
+							if (reads_q) {
+								sel.select(module, ff);
+								dropped++;
+								continue;
+							}
+						}
+					}
 					// a bit of a memory kept in logic keeps the enable only when its write data
 					// comes straight from a port or a flip-flop
 					if (ff->get_bool_attribute(ID(lse_memory_bit))) {

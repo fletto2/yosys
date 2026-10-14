@@ -141,35 +141,39 @@ static bool depends_on(RTLIL::SigSpec sig, const pool<RTLIL::SigBit> &target, po
 	return false;
 }
 
-// LSE only extracts a state machine when every next-state choice made outside the
-// case on the state register picks a constant: walking back from D, each mux whose
-// select does not depend on the state must have one constant data input.
+// LSE only extracts a state machine whose next state is chosen by a case on its own
+// value (not a chain of ?: compares), with every choice made outside that case picking
+// a constant or the state itself: walking back from D, each mux must have one such
+// input, and the walk must end at a case whose select depends on the state.
 static bool lse_override_ok(RTLIL::SigSpec sig_q, RTLIL::SigSpec sig)
 {
 	pool<RTLIL::SigBit> q_bits = sig_q.to_sigbit_pool();
 	for (int guard = 0; guard < 64; guard++) {
 		sig = assign_map(sig);
 		if (sig.is_fully_const() || sig == sig_q)
-			return true;
+			return false;
 		std::set<sig2driver_entry_t> drivers;
 		sig2driver.find(sig, drivers);
 		if (drivers.size() != 1)
-			return true;
+			return false;
 		RTLIL::Cell *cell = drivers.begin()->first;
-		if (cell->type != ID($mux))
-			return true;
+		if (!cell->type.in(ID($mux), ID($pmux)))
+			return false;
 		pool<RTLIL::SigBit> seen;
-		if (depends_on(cell->getPort(ID::S), q_bits, seen, 8))
-			return true;
+		bool on_state = depends_on(cell->getPort(ID::S), q_bits, seen, 8);
+		if (cell->type == ID($pmux))
+			return on_state;
+		// a ?: on the state picking a constant is one more override (if (state != DONE &&
+		// x) next = IDLE); a chain of them down to constants is not a case
 		RTLIL::SigSpec a = assign_map(cell->getPort(ID::A)), b = assign_map(cell->getPort(ID::B));
-		if (a.is_fully_const())
+		if (a == sig_q || a.is_fully_const())
 			sig = b;
-		else if (b.is_fully_const())
+		else if (b == sig_q || b.is_fully_const())
 			sig = a;
 		else
 			return false;
 	}
-	return true;
+	return false;
 }
 
 static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false, bool lse=false)
@@ -212,7 +216,7 @@ static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false, bool lse
 		looks_like_state_reg = check_state_mux_tree(sig_q, sig_d, recursion_monitor, mux_tree_cache);
 		looks_like_good_state_reg = lse || check_state_users(sig_q);
 		if (lse && looks_like_state_reg && !lse_override_ok(sig_q, sig_d)) {
-			log("Not marking %s.%s as FSM state register: a next-state mux outside the state case has no constant input (LSE rule).\n", wire->module, wire);
+			log("Not marking %s.%s as FSM state register: its next state is not a case on itself with constant or hold overrides (LSE rule).\n", wire->module, wire);
 			return;
 		}
 
