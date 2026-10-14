@@ -406,8 +406,9 @@ struct SynthIce40Pass : public ScriptPass
 		if (check_label("map_luts"))
 		{
 			if (latches == "error" || help_mode)
-				run("check -latchonly -assert", "(only if -latches error, the default)");
-			run("techmap -map +/ice40/latches_map.v");
+				run("check -latchonly -assert", "(only if -latches error)");
+			if (noabc || help_mode)
+				run("techmap -map +/ice40/latches_map.v", "(if -noabc)");
 			if (noabc || help_mode) {
 				run("simplemap", "                               (if -noabc)");
 				if (noabc || help_mode)
@@ -419,6 +420,9 @@ struct SynthIce40Pass : public ScriptPass
 				run("muxcover -mux4=300", "                (unless -noabc)");
 				run("ice40_lsereduce", "                 (unless -noabc)");
 				run("techmap -map +/ice40/lse_mux_map.v", "(unless -noabc)");
+				// a latch is a LUT feeding back on itself; after muxcover, which does not
+				// stop on such a loop
+				run("techmap -map +/ice40/latches_map.v", "(unless -noabc)");
 				// LSE duplicates small logic into its readers rather than sharing it, so
 				// no area recovery. A kept net (syn_keep) is a LUT output for LSE that
 				// the logic after it reads as is
