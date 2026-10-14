@@ -329,6 +329,7 @@ struct SynthIce40Pass : public ScriptPass
 			run("opt_clean");
 			// LSE takes the read address register into the RAM rather than a data
 			// register with a reset; also reserves memory port registers before ice40_dsp
+			run("ice40_lsememlogic");
 			run("memory_dff -lse" + no_rw_check_opt);
 			if (help_mode || dsp) {
 				run("wreduce t:$mul");
@@ -374,6 +375,8 @@ struct SynthIce40Pass : public ScriptPass
 		{
 			run("opt -fast -mux_undef -undriven -fine");
 			run("memory_map");
+			// LSE builds a memory it keeps in logic with the write enable in each bit's LUT
+			run("setattr -set lse_memory_bit 1 t:$dff n:$memory* %i");
 			run("opt -undriven -fine");
 		}
 

@@ -619,6 +619,11 @@ struct MemoryDffWorker
 	void run()
 	{
 		std::vector<Mem> memories = Mem::get_selected_memories(module);
+		// a memory ice40_lsememlogic keeps in logic: LSE builds it with its registers and
+		// read multiplexers as written, and a merged register would change what a read of
+		// the word being written returns under -no-rw-check
+		memories.erase(std::remove_if(memories.begin(), memories.end(), [](const Mem &m) {
+			return m.get_bool_attribute(ID(lse_logic)); }), memories.end());
 		for (auto &mem : memories) {
 			QuickConeSat qcsat(modwalker);
 			for (int i = 0; i < GetSize(mem.rd_ports); i++) {

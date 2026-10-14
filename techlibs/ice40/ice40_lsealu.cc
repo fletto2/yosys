@@ -2455,7 +2455,8 @@ struct Ice40LseCeCostPass : public Pass {
 		log("the enable (D, plus the enable logic if no other flip-flop shares it) and\n");
 		log("without it (E ? D : Q), estimated from the support of the logic only that\n");
 		log("flip-flop reads. LSE drops the enable when that is cheaper, or as cheap and D\n");
-		log("is an inverter.\n");
+		log("is an inverter. A bit of a memory kept in logic (lse_memory_bit) keeps it only\n");
+		log("when its write data comes from a port or a flip-flop rather than logic.\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -2536,6 +2537,16 @@ struct Ice40LseCeCostPass : public Pass {
 				// logic behind an enable several flip-flops share is there anyway
 				int e_cost = GetSize(it.second) == 1 ? luts(e_logic, GetSize(e_leaves)) : 0;
 				for (auto ff : it.second) {
+					// a bit of a memory kept in logic keeps the enable only when its write data
+					// comes straight from a port or a flip-flop
+					if (ff->get_bool_attribute(ID(lse_memory_bit))) {
+						SigBit wd = sigmap(ff->getPort(ID::D));
+						if (gate(driver.count(wd) ? driver.at(wd) : nullptr)) {
+							sel.select(module, ff);
+							dropped++;
+						}
+						continue;
+					}
 					SigBit d = sigmap(ff->getPort(ID::D)), q = sigmap(ff->getPort(ID::Q));
 					pool<SigBit> d_leaves;
 					bool d_logic = cone(d, d_leaves);
@@ -2560,5 +2571,106 @@ struct Ice40LseCeCostPass : public Pass {
 		}
 	}
 } Ice40LseCeCostPass;
+
+struct Ice40LseMemLogicPass : public Pass {
+	Ice40LseMemLogicPass() : Pass("ice40_lsememlogic", "keep a memory in logic where Lattice LSE finds no RAM for it") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsememlogic [selection]\n");
+		log("\n");
+		log("An asynchronous read whose data goes through a select against a constant (as in\n");
+		log("picorv32's  rs ? regs[rs] : 0 ) fits a RAM in LSE only if every register that\n");
+		log("captures it does so under one condition, and none of them also holds and loads\n");
+		log("something else. Otherwise LSE builds the memory from flip-flops; this pass marks\n");
+		log("such a memory ram_style=\"logic\" and lse_logic (memory_dff then leaves its\n");
+		log("registers outside, so its reads stay as written). Run before memory_dff.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEMEMLOGIC pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, std::vector<std::pair<Cell*, IdString>>> readers;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->input(conn.first))
+						for (auto b : sigmap(conn.second))
+							readers[b].push_back({cell, conn.first});
+			pool<IdString> logic;
+			for (auto cell : module->selected_cells()) {
+				if (!cell->type.in(ID($memrd), ID($memrd_v2)) || cell->getParam(ID::CLK_ENABLE).as_bool())
+					continue;
+				IdString memid = cell->getParam(ID::MEMID).decode_string();
+				if (logic.count(memid))
+					continue;
+				// the selected data: outputs of muxes with the read data on one side, a constant on the other
+				pool<SigBit> start;
+				for (auto b : sigmap(cell->getPort(ID::DATA)))
+					for (auto &r : readers[b])
+						if (r.first->type == ID($mux) && r.second != ID::S) {
+							SigSpec other = r.first->getPort(r.second == ID::A ? ID::B : ID::A);
+							if (other.is_fully_const())
+								for (auto y : sigmap(r.first->getPort(ID::Y)))
+									start.insert(y);
+						}
+				if (start.empty())
+					continue;
+				// load condition of each capturing flip-flop: its enable, or the mux selects
+				// on the way to D
+				typedef std::vector<std::pair<SigBit, bool>> Cond;
+				pool<Cond> conds;
+				bool bad = false;
+				std::vector<std::pair<SigBit, Cond>> todo;
+				pool<SigBit> seen;
+				for (auto b : start)
+					todo.push_back({b, Cond()});
+				while (!todo.empty() && !bad) {
+					SigBit b = todo.back().first;
+					Cond path = todo.back().second;
+					todo.pop_back();
+					if (!seen.insert(b).second)
+						continue;
+					for (auto &r : readers[b]) {
+						Cell *c = r.first;
+						if (c->type == ID($mux) && r.second != ID::S) {
+							Cond p = path;
+							p.push_back({sigmap(c->getPort(ID::S).as_bit()), r.second == ID::B});
+							for (auto y : sigmap(c->getPort(ID::Y)))
+								todo.push_back({y, p});
+						} else if (c->type.in(ID($dff), ID($adff), ID($dffe), ID($adffe)) && r.second == ID::D) {
+							bool en = c->type.in(ID($dffe), ID($adffe));
+							if (en && !path.empty()) {
+								bad = true;     // holds and loads something else too
+								break;
+							}
+							Cond k = path;
+							if (en)
+								k.push_back({sigmap(c->getPort(ID::EN).as_bit()), c->getParam(ID::EN_POLARITY).as_bool()});
+							std::sort(k.begin(), k.end());
+							conds.insert(k);
+						} else if (!c->type.in(ID($memwr), ID($memwr_v2))) {
+							bad = true;         // read by other logic before a register
+							break;
+						}
+					}
+				}
+				if (bad || GetSize(conds) > 1) {
+					logic.insert(memid);
+					log("  %s: %s stays in logic.\n", log_id(module), log_id(memid));
+				}
+			}
+			for (auto memid : logic)
+				if (module->memories.count(memid))
+				{
+					module->memories.at(memid)->set_string_attribute(ID::ram_style, "logic");
+					module->memories.at(memid)->set_bool_attribute(ID(lse_logic));
+				}
+		}
+	}
+} Ice40LseMemLogicPass;
 
 PRIVATE_NAMESPACE_END
