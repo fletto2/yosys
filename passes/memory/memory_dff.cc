@@ -605,8 +605,13 @@ struct MemoryDffWorker
 		port.addr = ff.sig_d;
 		port.clk_enable = true;
 		port.clk_polarity = ff.pol_clk;
-		for (int i = 0; i < GetSize(mem.wr_ports); i++)
-			port.transparency_mask[i] = true;
+		// with no read/write check a read of the address being written is undefined,
+		// so no bypass logic is needed (LSE builds none)
+		bool no_rw = flag_no_rw_check || mem.get_bool_attribute(ID::no_rw_check);
+		for (int i = 0; i < GetSize(mem.wr_ports); i++) {
+			port.transparency_mask[i] = !no_rw;
+			port.collision_x_mask[i] = no_rw;
+		}
 		mem.emit();
 		log("merged address FF to cell.\n");
 	}
