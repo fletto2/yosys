@@ -395,7 +395,9 @@ struct Ice40RadiantPass : public Pass {
 						SigSpec a = P("A"), b = P("B"), c = P("C"), d = ccu ? (h ? co0 : ci0) : P("D");
 						SigSpec ci = h ? (ccu ? co0 : port("CI1")) : ci0;
 						SigSpec co = h ? port(ccu ? "COUT" : "CO1") : co0;
-						Cell *l = module->addCell(NEW_ID, ID(SB_LUT4));
+						// named after the FA2 so the placer can put the LUT and the carry of a
+						// half in one logic cell even when all their inputs are constants
+						Cell *l = module->addCell(stringf("%s$lut%d", cell->name.c_str(), h), ID(SB_LUT4));
 						l->setPort(ID(I0), a.empty() ? SigSpec(State::S0) : a);
 						l->setPort(ID(I1), b.empty() ? SigSpec(State::S0) : b);
 						l->setPort(ID(I2), c.empty() ? SigSpec(State::S0) : c);
@@ -403,8 +405,11 @@ struct Ice40RadiantPass : public Pass {
 						SigSpec sum = P("S");
 						l->setPort(ID::O, sum.empty() ? SigSpec(module->addWire(NEW_ID)) : sum);
 						l->setParam(ID(LUT_INIT), value(param(h ? "INIT1" : "INIT0", "0xc33c"), 16));
+						// programmed even when nothing reads the sum
+						if (sum.empty())
+							l->set_bool_attribute(ID::keep);
 						// Radiant enables the carry of both halves even where nothing reads it
-						Cell *k = module->addCell(NEW_ID, ID(SB_CARRY));
+						Cell *k = module->addCell(stringf("%s$carry%d", cell->name.c_str(), h), ID(SB_CARRY));
 						k->setPort(ID(I0), b.empty() ? SigSpec(State::S0) : b);
 						k->setPort(ID(I1), c.empty() ? SigSpec(State::S0) : c);
 						// an unconnected carry-in is 1 in Radiant's model
