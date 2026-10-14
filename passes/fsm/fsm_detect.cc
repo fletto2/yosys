@@ -144,10 +144,23 @@ static bool depends_on(RTLIL::SigSpec sig, const pool<RTLIL::SigBit> &target, po
 // LSE only extracts a state machine whose next state is chosen by a case on its own
 // value (not a chain of ?: compares), with every choice made outside that case picking
 // a constant or the state itself: walking back from D, each mux must have one such
-// input, and the walk must end at a case whose select depends on the state.
-static bool lse_override_ok(RTLIL::SigSpec sig_q, RTLIL::SigSpec sig)
+// input, and the walk must end at a case whose select depends on the state. With a
+// synchronous reset a choice between constants (mode ? B : A) is accepted too; with an
+// asynchronous one it is not (lsecmp t/fs1..fs6, spimemio vs layer_renderer).
+static bool lse_override_ok(RTLIL::SigSpec sig_q, RTLIL::SigSpec sig, bool const_trees)
 {
 	pool<RTLIL::SigBit> q_bits = sig_q.to_sigbit_pool();
+	std::function<bool(RTLIL::SigSpec, int)> const_tree = [&](RTLIL::SigSpec x, int depth) -> bool {
+		x = assign_map(x);
+		if (x.is_fully_const())
+			return true;
+		std::set<sig2driver_entry_t> drivers;
+		sig2driver.find(x, drivers);
+		if (depth > 4 || drivers.size() != 1 || drivers.begin()->first->type != ID($mux))
+			return false;
+		RTLIL::Cell *m = drivers.begin()->first;
+		return const_tree(m->getPort(ID::A), depth + 1) && const_tree(m->getPort(ID::B), depth + 1);
+	};
 	for (int guard = 0; guard < 64; guard++) {
 		sig = assign_map(sig);
 		if (sig.is_fully_const() || sig == sig_q)
@@ -166,9 +179,9 @@ static bool lse_override_ok(RTLIL::SigSpec sig_q, RTLIL::SigSpec sig)
 		// a ?: on the state picking a constant is one more override (if (state != DONE &&
 		// x) next = IDLE); a chain of them down to constants is not a case
 		RTLIL::SigSpec a = assign_map(cell->getPort(ID::A)), b = assign_map(cell->getPort(ID::B));
-		if (a == sig_q || a.is_fully_const())
+		if (a == sig_q || a.is_fully_const() || (const_trees && const_tree(a, 0)))
 			sig = b;
-		else if (b == sig_q || b.is_fully_const())
+		else if (b == sig_q || b.is_fully_const() || (const_trees && const_tree(b, 0)))
 			sig = a;
 		else
 			return false;
@@ -215,7 +228,7 @@ static void detect_fsm(RTLIL::Wire *wire, bool ignore_self_reset=false, bool lse
 
 		looks_like_state_reg = check_state_mux_tree(sig_q, sig_d, recursion_monitor, mux_tree_cache);
 		looks_like_good_state_reg = lse || check_state_users(sig_q);
-		if (lse && looks_like_state_reg && !lse_override_ok(sig_q, sig_d)) {
+		if (lse && looks_like_state_reg && !lse_override_ok(sig_q, sig_d, cellport.first->type == ID($dff))) {
 			log("Not marking %s.%s as FSM state register: its next state is not a case on itself with constant or hold overrides (LSE rule).\n", wire->module, wire);
 			return;
 		}
