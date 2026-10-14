@@ -286,6 +286,10 @@ struct OptMergeThreadWorker
 			}
 			if (cell->type == ID($scopeinfo))
 				continue;
+			// two tristate drivers with the same inputs may drive different pads, each
+			// needs its own enable
+			if (cell->type.in(ID($tribuf), ID($_TBUF_)))
+				continue;
 			if (mode_keepdc && has_dont_care_initval(cell))
 				continue;
 			if (!cell->known())

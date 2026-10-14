@@ -279,6 +279,8 @@ struct SynthIce40Pass : public ScriptPass
 			// before opt_merge shares a compared multiplexer with an identical one
 			run("ice40_lsemuxcmp");
 			// identical drivers of one net (e.g. a duplicated assign) are one driver, as for LSE
+			// (tristate buffers first: opt_merge keeps those apart)
+			run("tribuf");
 			run("opt_merge");
 		}
 
