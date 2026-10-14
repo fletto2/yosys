@@ -1786,4 +1786,116 @@ struct Ice40LseCutPass : public Pass {
 	}
 } Ice40LseCutPass;
 
+struct Ice40LseTwoWayPass : public Pass {
+	Ice40LseTwoWayPass() : Pass("ice40_lsetwoway", "reduce a multiplexer tree over two words to one multiplexer, as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsetwoway [selection]\n");
+		log("\n");
+		log("A tree of $mux cells (inner ones read only by the tree) whose data inputs are\n");
+		log("just two words W0 and W1 (and don't-cares) becomes one $mux between them. Its\n");
+		log("select is the same tree built one bit wide with W0 = 0 and W1 = 1, shared by\n");
+		log("all bits.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSETWOWAY pass.\n");
+		for (auto module : design->selected_modules()) {
+			int count = 0;
+			for (bool changed = true; changed; ) {
+				changed = false;
+				SigMap sigmap(module);
+				dict<SigBit, int> nreaders;
+				for (auto cell : module->cells())
+					for (auto &conn : cell->connections())
+						if (cell->input(conn.first))
+							for (auto b : sigmap(conn.second))
+								nreaders[b]++;
+				for (auto w : module->wires())
+					if (w->port_output || w->get_bool_attribute(ID::keep))
+						for (auto b : sigmap(SigSpec(w)))
+							nreaders[b] += 2;
+				dict<SigSpec, Cell*> mux_of;
+				pool<SigBit> mux_bits;
+				for (auto cell : module->cells())
+					if (cell->type == ID($mux)) {
+						SigSpec y = sigmap(cell->getPort(ID::Y));
+						mux_of[y] = cell;
+						for (auto b : y)
+							mux_bits.insert(b);
+					}
+				// a $mux whose output is read only by another $mux is an inner node
+				auto inner = [&](const SigSpec &sig) {
+					if (!mux_of.count(sig))
+						return false;
+					for (auto b : sig)
+						if (nreaders[b] != 1)
+							return false;
+					return true;
+				};
+				for (auto root : module->selected_cells()) {
+					if (root->type != ID($mux))
+						continue;
+					SigSpec ry = sigmap(root->getPort(ID::Y));
+					if (inner(ry) && GetSize(ry) > 0) {
+						// part of a bigger tree: start from its root
+						bool parent_mux = false;
+						for (auto cell : module->cells())
+							if (cell->type == ID($mux) && cell != root)
+								for (auto port : {ID::A, ID::B})
+									if (sigmap(cell->getPort(port)) == ry)
+										parent_mux = true;
+						if (parent_mux)
+							continue;
+					}
+					std::vector<SigSpec> leaves;
+					int nodes = 0;
+					std::function<void(SigSpec)> walk = [&](SigSpec sig) {
+						if (inner(sig) && nodes < 64) {
+							Cell *m = mux_of.at(sig);
+							nodes++;
+							walk(sigmap(m->getPort(ID::A)));
+							walk(sigmap(m->getPort(ID::B)));
+						} else {
+							if (sig.is_fully_undef())
+								return;
+							for (auto &l : leaves)
+								if (l == sig)
+									return;
+							leaves.push_back(sig);
+						}
+					};
+					nodes++;
+					walk(sigmap(root->getPort(ID::A)));
+					walk(sigmap(root->getPort(ID::B)));
+					if (nodes < 2 || GetSize(leaves) != 2 || leaves[0].is_fully_const() || leaves[1].is_fully_const())
+						continue;
+					// the select: the tree one bit wide, W0 -> 0, W1 -> 1
+					std::function<SigBit(SigSpec)> bit_tree = [&](SigSpec sig) -> SigBit {
+						if (sig == leaves[0]) return State::S0;
+						if (sig == leaves[1]) return State::S1;
+						if (sig.is_fully_undef()) return State::Sx;
+						Cell *m = mux_of.at(sig);
+						SigBit a = bit_tree(sigmap(m->getPort(ID::A))), b = bit_tree(sigmap(m->getPort(ID::B)));
+						return module->MuxGate(NEW_ID, a, b, m->getPort(ID::S).as_bit());
+					};
+					SigBit sel = bit_tree(ry);
+					SigSpec y = root->getPort(ID::Y);
+					module->remove(root);
+					module->addMux(NEW_ID, leaves[0], leaves[1], sel, y);
+					log("  %s: %d multiplexers over %s and %s\n", log_signal(y), nodes, log_signal(leaves[0]), log_signal(leaves[1]));
+					count++;
+					changed = true;
+					break;
+				}
+			}
+			log("%s: %d multiplexer trees over two words reduced.\n", log_id(module), count);
+		}
+	}
+} Ice40LseTwoWayPass;
+
 PRIVATE_NAMESPACE_END

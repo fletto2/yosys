@@ -308,6 +308,8 @@ struct SynthIce40Pass : public ScriptPass
 			run("pmux2shiftx");
 			run("pmuxtree");
 			run("opt");
+			run("ice40_lsetwoway");
+			run("opt_clean");
 			run("wreduce");
 			run("peepopt");
 			run("opt_clean");
