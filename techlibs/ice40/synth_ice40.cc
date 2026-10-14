@@ -104,8 +104,9 @@ struct SynthIce40Pass : public ScriptPass
 		log("    -latches <info|warn|error>\n");
 		log("        select the behaviour for latches that cannot be mapped to a\n");
 		log("        dedicated hardware primitive and are implemented using LUTs\n");
-		log("        instead. 'error' (the default) aborts synthesis, 'warn' only\n");
-		log("        prints a warning, and 'info' permits them with an info-level message.\n");
+		log("        instead (a LUT feeding back on itself, as LSE builds them). 'error'\n");
+		log("        aborts synthesis, 'warn' (the default) only prints a warning, and\n");
+		log("        'info' permits them with an info-level message.\n");
 		log("\n");
 		log("\n");
 		log("The following commands are executed by this synthesis command:\n");
@@ -133,7 +134,7 @@ struct SynthIce40Pass : public ScriptPass
 		noabc = false;
 		vpr = false;
 		device_opt = "hx";
-		latches = "error";
+		latches = "warn";
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -310,6 +311,7 @@ struct SynthIce40Pass : public ScriptPass
 			run("pmux2shiftx");
 			run("pmuxtree");
 			run("opt");
+			run("ice40_lseandsr");
 			run("ice40_lsetwoway");
 			run("opt_clean");
 			run("wreduce");

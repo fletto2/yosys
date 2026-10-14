@@ -17,6 +17,8 @@
 
 #include "kernel/yosys.h"
 #include "kernel/sigtools.h"
+#include "kernel/ff.h"
+#include "kernel/ffinit.h"
 #include <functional>
 
 USING_YOSYS_NAMESPACE
@@ -1924,5 +1926,99 @@ struct Ice40LseTwoWayPass : public Pass {
 		}
 	}
 } Ice40LseTwoWayPass;
+
+struct Ice40LseAndSrPass : public Pass {
+	Ice40LseAndSrPass() : Pass("ice40_lseandsr", "take a factor of an AND in front of a flip-flop as its synchronous reset, as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lseandsr [selection]\n");
+		log("\n");
+		log("A $dff whose D is 'L && R' (read only by it) becomes a $sdff that resets when\n");
+		log("one factor is 0, loading the other: the factor that is a single signal (or\n");
+		log("its inverse) when only one of them is, R when neither is; nothing when both\n");
+		log("are single signals.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEANDSR pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, Cell*> driver;
+			dict<SigBit, int> nreaders;
+			for (auto cell : module->cells()) {
+				for (auto &conn : cell->connections()) {
+					if (cell->output(conn.first))
+						for (auto b : sigmap(conn.second))
+							driver[b] = cell;
+					else
+						for (auto b : sigmap(conn.second))
+							nreaders[b]++;
+				}
+			}
+			for (auto w : module->wires())
+				if (w->port_output)
+					for (auto b : sigmap(SigSpec(w)))
+						nreaders[b]++;
+			// a single signal: an input, a flip-flop output or the inverse of one
+			std::function<bool(SigBit)> single = [&](SigBit b) {
+				if (!b.wire || !driver.count(b))
+					return true;
+				Cell *c = driver.at(b);
+				if (RTLIL::builtin_ff_cell_types().count(c->type))
+					return true;
+				if (c->type.in(ID($not), ID($logic_not), ID($_NOT_)) && GetSize(c->getPort(ID::A)) == 1)
+					return single(sigmap(c->getPort(ID::A).as_bit()));
+				return false;
+			};
+			int count = 0;
+			FfInitVals initvals(&sigmap, module);
+			std::vector<Cell*> ffs;
+			for (auto cell : module->selected_cells())
+				if (cell->type == ID($dff))
+					ffs.push_back(cell);
+			for (auto cell : ffs) {
+				FfData ff(&initvals, cell);
+				std::vector<int> plain_bits;
+				std::vector<std::tuple<int, SigBit, SigBit>> reset_bits;	// bit, reset factor, data
+				for (int i = 0; i < ff.width; i++) {
+					SigBit d = sigmap(ff.sig_d[i]);
+					Cell *g = driver.count(d) ? driver.at(d) : nullptr;
+					if (!g || nreaders[d] != 1 || !g->type.in(ID($logic_and), ID($and)) ||
+							GetSize(g->getPort(ID::A)) != 1 || GetSize(g->getPort(ID::B)) != 1) {
+						plain_bits.push_back(i);
+						continue;
+					}
+					SigBit l = sigmap(g->getPort(ID::A).as_bit()), r = sigmap(g->getPort(ID::B).as_bit());
+					bool sl = single(l), sr = single(r);
+					if (!l.wire || !r.wire || (sl && sr)) {
+						plain_bits.push_back(i);
+						continue;
+					}
+					reset_bits.push_back({i, sl ? l : r, sl ? r : l});
+				}
+				if (reset_bits.empty())
+					continue;
+				if (!plain_bits.empty())
+					ff.slice(plain_bits).emit();
+				for (auto &rb : reset_bits) {
+					FfData bit = ff.slice({std::get<0>(rb)});
+					bit.has_srst = true;
+					bit.sig_srst = std::get<1>(rb);
+					bit.pol_srst = false;
+					bit.val_srst = Const(State::S0, 1);
+					bit.sig_d = std::get<2>(rb);
+					bit.emit();
+					count++;
+				}
+				module->remove(cell);
+			}
+			log("%s: %d flip-flops reset by a factor of their AND.\n", log_id(module), count);
+		}
+	}
+} Ice40LseAndSrPass;
 
 PRIVATE_NAMESPACE_END
