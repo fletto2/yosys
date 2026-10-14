@@ -38,6 +38,7 @@ struct Ice40IopackPass : public Pass {
 		log("    - a flip-flop that is the only reader of an input/inout pad becomes the\n");
 		log("      pad's input register; a falling-edge clock is replaced by an inverted\n");
 		log("      copy of the LUT driving it, so the tile's shared NegClk bit stays free\n");
+		log("    - the same for a pad that is already an SB_IO (an inout in an LSE netlist)\n");
 		log("    - every other pad gets an explicit SB_IO, with the unused input half of\n");
 		log("      an output-only pad set to 2'b00 (plain) or 2'b10 (registered output)\n");
 		log("    - the 100k pull-up is enabled on every SB_IO\n");
@@ -187,6 +188,33 @@ struct Ice40IopackPass : public Pass {
 				io->setPort(ID(OUTPUT_ENABLE), tbuf->getPort(ID::E));
 				remove.push_back(tbuf);
 			}
+			remove.push_back(ff);
+			n_in++;
+		}
+
+		// a pad that is already an SB_IO (an inout from the netlist) whose input feeds
+		// only a flip-flop: that flip-flop is the pad's input register
+		dict<SigBit, Cell*> ff_by_d;
+		for (auto ff : module->selected_cells())
+			if (ff->type.in(ID(SB_DFF), ID(SB_DFFN), ID(SB_DFFE), ID(SB_DFFNE)) && !packed.count(ff))
+				ff_by_d[sigmap(ff->getPort(ID::D))] = ff;
+		for (auto io : module->selected_cells()) {
+			if (io->type != ID(SB_IO) || !io->hasPort(ID(D_IN_0)) || io->hasPort(ID(INPUT_CLK)))
+				continue;
+			SigBit d = sigmap(io->getPort(ID(D_IN_0)));
+			Const pt = io->getParam(ID(PIN_TYPE));
+			if (d.wire == nullptr || nusers[d] != 1 || !ff_by_d.count(d) || pt[0] != State::S1 || pt[1] != State::S0)
+				continue;
+			Cell *ff = ff_by_d.at(d);
+			SigBit clk = ff->getPort(ID::C);
+			if (ff->type.in(ID(SB_DFFN), ID(SB_DFFNE)))
+				clk = invert_clock(clk);
+			pt.bits()[0] = State::S0;
+			io->setParam(ID(PIN_TYPE), pt);
+			io->setPort(ID(INPUT_CLK), clk);
+			io->setPort(ID(D_IN_0), ff->getPort(ID::Q));
+			if (ff->hasPort(ID::E))
+				io->setPort(ID(CLOCK_ENABLE), ff->getPort(ID::E));
 			remove.push_back(ff);
 			n_in++;
 		}
