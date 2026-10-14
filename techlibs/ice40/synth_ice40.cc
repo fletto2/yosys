@@ -368,6 +368,7 @@ struct SynthIce40Pass : public ScriptPass
 
 		if (check_label("map_gates"))
 		{
+			run("ice40_lsecut -conds");
 			run("ice40_lsealu");
 			if (nocarry)
 				run("techmap");
@@ -409,11 +410,11 @@ struct SynthIce40Pass : public ScriptPass
 				run("ice40_lsereduce", "                 (unless -noabc)");
 				run("techmap -map +/ice40/lse_mux_map.v", "(unless -noabc)");
 				// LSE duplicates small logic into its readers rather than sharing it, so
-				// no area recovery. A kept net (syn_keep) is a LUT output for LSE: map
-				// the logic in front of it first, so the rest reads the net itself
-				run("select -set lse_keep w:* a:keep %i %cie* t:$_* %i", "(unless -noabc)");
-				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs2 @lse_keep", "(unless -noabc)");
+				// no area recovery. A kept net (syn_keep) is a LUT output for LSE that
+				// the logic after it reads as is
+				run("ice40_lsecut -insert a:keep a:lse_cut %u", "(unless -noabc)");
 				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs2", "(unless -noabc)");
+				run("ice40_lsecut -remove", "           (unless -noabc)");
 			}
 			run("ice40_wrapcarry -unwrap");
 			run("techmap -map +/ice40/ff_map.v");

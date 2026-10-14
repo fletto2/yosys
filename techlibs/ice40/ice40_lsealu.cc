@@ -1644,4 +1644,146 @@ struct Ice40LseMuxCmpPass : public Pass {
 	}
 } Ice40LseMuxCmpPass;
 
+struct Ice40LseCutPass : public Pass {
+	Ice40LseCutPass() : Pass("ice40_lsecut", "keep nets as LUT boundaries through abc") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsecut -insert [selection]\n");
+		log("    ice40_lsecut -remove [selection]\n");
+		log("    ice40_lsecut -conds [selection]\n");
+		log("\n");
+		log("-insert puts a $__ICE40_LSECUT cell after every bit of the selected wires that is\n");
+		log("driven by a gate, and makes all readers read its output, so abc sees the net as\n");
+		log("a boundary (a LUT output that the logic after it reads as is). -remove takes\n");
+		log("the cells out again. -conds marks (attribute lse_cut) the select of every $mux\n");
+		log("that depends on more than two signals: the condition of an if, which LSE\n");
+		log("builds as its own LUT.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		bool insert = false, remove = false, conds = false;
+		size_t argidx;
+		for (argidx = 1; argidx < args.size(); argidx++) {
+			if (args[argidx] == "-insert") { insert = true; continue; }
+			if (args[argidx] == "-remove") { remove = true; continue; }
+			if (args[argidx] == "-conds") { conds = true; continue; }
+			break;
+		}
+		extra_args(args, argidx, design);
+		if (int(insert) + int(remove) + int(conds) != 1)
+			log_cmd_error("Give one of -insert, -remove and -conds.\n");
+		log_header(design, "Executing ICE40_LSECUT pass.\n");
+		for (auto module : design->selected_modules()) {
+			int count = 0;
+			if (conds) {
+				SigMap sigmap(module);
+				dict<SigBit, Cell*> driver;
+				for (auto cell : module->cells())
+					if (cell->type.begins_with("$") && !RTLIL::builtin_ff_cell_types().count(cell->type) && !cell->type.begins_with("$mem"))
+						for (auto &conn : cell->connections())
+							if (cell->output(conn.first))
+								for (auto bit : sigmap(conn.second))
+									driver[bit] = cell;
+				// bit-level readers of each net: a condition read by one 2:1 mux bit
+				// merges into it
+				dict<SigBit, int> readers;
+				for (auto cell : module->cells())
+					for (auto &conn : cell->connections())
+						if (cell->input(conn.first)) {
+							int w = cell->type == ID($mux) && conn.first == ID::S ? GetSize(cell->getPort(ID::Y)) : 1;
+							for (auto b : sigmap(conn.second))
+								readers[b] += w;
+						}
+				for (auto cell : module->selected_cells()) {
+					if (cell->type != ID($mux))
+						continue;
+					SigSpec sw = cell->getPort(ID::S);
+					SigBit sb = sigmap(sw.as_bit());
+					if (!driver.count(sb) || !sw[0].wire || readers[sb] < 2)
+						continue;
+					pool<SigBit> vars;
+					pool<Cell*> seen;
+					std::vector<SigBit> stack = {sb};
+					while (!stack.empty() && GetSize(vars) <= 2) {
+						SigBit x = stack.back();
+						stack.pop_back();
+						if (!x.wire)
+							continue;
+						if (!driver.count(x)) { vars.insert(x); continue; }
+						Cell *c = driver.at(x);
+						if (seen.count(c))
+							continue;
+						seen.insert(c);
+						for (auto &conn : c->connections())
+							if (c->input(conn.first))
+								for (auto y : sigmap(conn.second))
+									stack.push_back(y);
+					}
+					if (GetSize(vars) > 2) {
+						sw[0].wire->set_bool_attribute(ID(lse_cut));
+						count++;
+					}
+				}
+				log("%s: %d conditions marked.\n", log_id(module), count);
+				continue;
+			}
+			if (remove) {
+				std::vector<Cell*> cuts;
+				for (auto cell : module->cells())
+					if (cell->type == ID($__ICE40_LSECUT))
+						cuts.push_back(cell);
+				for (auto cell : cuts) {
+					module->connect(cell->getPort(ID::Y), cell->getPort(ID::A));
+					module->remove(cell);
+					count++;
+				}
+				log("%s: %d cuts removed.\n", log_id(module), count);
+				continue;
+			}
+			SigMap sigmap(module);
+			pool<SigBit> driven;
+			for (auto cell : module->cells())
+				if (cell->type.begins_with("$_"))
+					for (auto &conn : cell->connections())
+						if (cell->output(conn.first))
+							for (auto b : sigmap(conn.second))
+								driven.insert(b);
+			pool<SigBit> bits;
+			for (auto w : module->selected_wires())
+				for (auto b : sigmap(SigSpec(w)))
+					if (driven.count(b))
+						bits.insert(b);
+			if (bits.empty())
+				continue;
+			dict<SigBit, SigBit> repl;
+			for (auto b : bits) {
+				SigBit y = module->addWire(NEW_ID);
+				Cell *c = module->addCell(NEW_ID, ID($__ICE40_LSECUT));
+				c->setPort(ID::A, b);
+				c->setPort(ID::Y, y);
+				repl[b] = y;
+				count++;
+			}
+			for (auto cell : module->cells()) {
+				if (cell->type == ID($__ICE40_LSECUT))
+					continue;
+				for (auto &conn : cell->connections()) {
+					if (!cell->input(conn.first))
+						continue;
+					SigSpec sig = sigmap(conn.second);
+					bool changed = false;
+					for (auto &b : sig)
+						if (repl.count(b)) { b = repl.at(b); changed = true; }
+					if (changed)
+						cell->setPort(conn.first, sig);
+				}
+			}
+			log("%s: %d nets cut.\n", log_id(module), count);
+		}
+	}
+} Ice40LseCutPass;
+
 PRIVATE_NAMESPACE_END
