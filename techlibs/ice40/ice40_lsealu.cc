@@ -1938,7 +1938,7 @@ struct Ice40LseAndSrPass : public Pass {
 		log("A $dff whose D is 'L && R' (read only by it) becomes a $sdff that resets when\n");
 		log("one factor is 0, loading the other: the factor that is a single signal (or\n");
 		log("its inverse) when only one of them is, R when neither is; nothing when both\n");
-		log("are single signals.\n");
+		log("are single signals, or when the reset factor compares two words.\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -1974,6 +1974,30 @@ struct Ice40LseAndSrPass : public Pass {
 					return single(sigmap(c->getPort(ID::A).as_bit()));
 				return false;
 			};
+			// is there a comparison of two non-constant words in front of b
+			auto compares_words = [&](SigBit b) {
+				pool<Cell*> seen;
+				std::vector<SigBit> stack = {b};
+				while (!stack.empty()) {
+					SigBit x = stack.back();
+					stack.pop_back();
+					if (!x.wire || !driver.count(x))
+						continue;
+					Cell *c = driver.at(x);
+					if (seen.count(c) || RTLIL::builtin_ff_cell_types().count(c->type))
+						continue;
+					seen.insert(c);
+					if (c->type.in(ID($lt), ID($le), ID($gt), ID($ge), ID($eq), ID($ne)) &&
+							!sigmap(c->getPort(ID::A)).is_fully_const() && !sigmap(c->getPort(ID::B)).is_fully_const() &&
+							GetSize(c->getPort(ID::A)) > 1)
+						return true;
+					for (auto &conn : c->connections())
+						if (c->input(conn.first))
+							for (auto y : sigmap(conn.second))
+								stack.push_back(y);
+				}
+				return false;
+			};
 			int count = 0;
 			FfInitVals initvals(&sigmap, module);
 			std::vector<Cell*> ffs;
@@ -1998,7 +2022,13 @@ struct Ice40LseAndSrPass : public Pass {
 						plain_bits.push_back(i);
 						continue;
 					}
-					reset_bits.push_back({i, sl ? l : r, sl ? r : l});
+					// a factor that compares two words stays in D
+					SigBit rf = sl ? l : r;
+					if (compares_words(rf)) {
+						plain_bits.push_back(i);
+						continue;
+					}
+					reset_bits.push_back({i, rf, sl ? r : l});
 				}
 				if (reset_bits.empty())
 					continue;
