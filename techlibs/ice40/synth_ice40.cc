@@ -389,7 +389,11 @@ struct SynthIce40Pass : public ScriptPass
 			if (nodffe)
 				run(stringf("dfflegalize -cell $_DFF_?_ 0 -cell $_DFF_?P?_ 0 -cell $_SDFF_?P?_ 0 -cell $_DLATCH_?_ x"));
 			else
+			{
+				// LSE uses a synchronous set only together with a clock enable
+				run("dffunmap -srst-only t:$_SDFF_??1_ t:$sdff r:SRST_VALUE=1'1 %i %u");
 				run(stringf("dfflegalize -cell $_DFF_?_ 0 -cell $_DFFE_?P_ 0 -cell $_DFF_?P?_ 0 -cell $_DFFE_?P?P_ 0 -cell $_SDFF_?P?_ 0 -cell $_SDFFCE_?P?P_ 0 -cell $_DLATCH_?_ x -mince %d", min_ce_use));
+			}
 			run("techmap -map +/ice40/ff_map.v");
 			run("opt_expr -mux_undef");
 			run("simplemap");
