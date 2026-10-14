@@ -403,14 +403,14 @@ struct Ice40RadiantPass : public Pass {
 						SigSpec sum = P("S");
 						l->setPort(ID::O, sum.empty() ? SigSpec(module->addWire(NEW_ID)) : sum);
 						l->setParam(ID(LUT_INIT), value(param(h ? "INIT1" : "INIT0", "0xc33c"), 16));
-						if (!co.empty()) {
-							Cell *k = module->addCell(NEW_ID, ID(SB_CARRY));
-							k->setPort(ID(I0), b.empty() ? SigSpec(State::S0) : b);
-							k->setPort(ID(I1), c.empty() ? SigSpec(State::S0) : c);
-							// an unconnected carry-in is 1 in Radiant's model
-							k->setPort(ID(CI), ci.empty() ? SigSpec(State::S1) : ci);
-							k->setPort(ID(CO), co);
-						}
+						// Radiant enables the carry of both halves even where nothing reads it
+						Cell *k = module->addCell(NEW_ID, ID(SB_CARRY));
+						k->setPort(ID(I0), b.empty() ? SigSpec(State::S0) : b);
+						k->setPort(ID(I1), c.empty() ? SigSpec(State::S0) : c);
+						// an unconnected carry-in is 1 in Radiant's model
+						k->setPort(ID(CI), ci.empty() ? SigSpec(State::S1) : ci);
+						k->setPort(ID(CO), co.empty() ? SigSpec(module->addWire(NEW_ID)) : co);
+						k->set_bool_attribute(ID::keep);
 					}
 				} else if (t == ID(INV)) {
 					module->addNotGate(NEW_ID, port("A").as_bit(), port("Z").as_bit());
