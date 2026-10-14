@@ -435,6 +435,46 @@ struct Ice40RadiantPass : public Pass {
 					module->rename(n, name);
 				count++;
 			}
+			// an INV that only clocks flip-flops is the register's clock polarity: Radiant
+			// folds it into NegClk instead of spending a LUT
+			{
+				SigMap sm(module);
+				dict<SigBit, std::vector<Cell*>> clocked;
+				pool<SigBit> other_use;
+				for (auto c : module->cells())
+					for (auto &conn : c->connections())
+						if (!c->output(conn.first))
+							for (auto bit : sm(conn.second)) {
+								if (c->type.begins_with("\\SB_DFF") && conn.first == ID::C)
+									clocked[bit].push_back(c);
+								else
+									other_use.insert(bit);
+							}
+				for (auto w : module->wires())
+					if (w->port_output)
+						for (auto bit : sm(SigSpec(w)))
+							other_use.insert(bit);
+				std::vector<Cell*> nots;
+				for (auto c : module->cells())
+					if (c->type == ID($_NOT_))
+						nots.push_back(c);
+				for (auto c : nots) {
+					SigBit y = sm(c->getPort(ID::Y));
+					if (other_use.count(y) || !clocked.count(y))
+						continue;
+					bool ok = true;
+					for (auto ff : clocked.at(y))
+						if (ff->type.str().substr(0, 7) != "\\SB_DFF" || ff->type.str()[7] == 'N')
+							ok = false;
+					if (!ok)
+						continue;
+					for (auto ff : clocked.at(y)) {
+						ff->type = RTLIL::escape_id("SB_DFFN" + ff->type.str().substr(7));
+						ff->setPort(ID::C, c->getPort(ID::A));
+					}
+					module->remove(c);
+				}
+			}
 			if (count)
 				log("%s: %d Radiant primitives replaced.\n", log_id(module), count);
 		}

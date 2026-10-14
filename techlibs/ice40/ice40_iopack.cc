@@ -129,14 +129,39 @@ struct Ice40IopackPass : public Pass {
 			return io;
 		};
 
+		// a falling-edge register clocked from logic gets the inverted copy of that logic; one
+		// clocked straight from a pad uses the tile's NegClk, as Radiant does
+		auto set_clock = [&](Cell *io, IdString port, Cell *ff) {
+			SigBit clk = ff->getPort(ID::C);
+			if (ff->type.in(ID(SB_DFFN), ID(SB_DFFNE))) {
+				auto it = driver.find(sigmap(clk));
+				if (it != driver.end() && it->second.first->type == ID(SB_LUT4))
+					clk = invert_clock(clk);
+				else
+					io->setParam(ID(NEG_TRIGGER), Const(1, 1));
+			}
+			io->setPort(port, clk);
+		};
+
 		for (auto bit : useioff_bits) {
 			auto it = driver.find(bit);
 			if (it == driver.end() || it->second.second != ID::Q || nusers[bit] != 1)
 				continue;
 			Cell *ff = it->second.first;
 			IdString t = ff->type;
-			if (!t.in(ID(SB_DFF), ID(SB_DFFE), ID(SB_DFFSR), ID(SB_DFFESR), ID(SB_DFFSS), ID(SB_DFFESS)))
+			if (!t.in(ID(SB_DFF), ID(SB_DFFE), ID(SB_DFFSR), ID(SB_DFFESR), ID(SB_DFFSS), ID(SB_DFFESS),
+					ID(SB_DFFN), ID(SB_DFFNE)))
 				continue;
+			// LSE makes a register without enable that reads an input pad that pad's input
+			// register, even when it also drives an output pad
+			bool no_enable = t.in(ID(SB_DFF), ID(SB_DFFN)) ||
+					(t.in(ID(SB_DFFE), ID(SB_DFFNE)) && sigmap(ff->getPort(ID::E)) == SigSpec(State::S1));
+			if (no_enable) {
+				SigBit d = sigmap(ff->getPort(ID::D));
+				if (port_bit.count(d) && port_bit.at(d).wire->port_input && !driver.count(d) &&
+						nusers[d] == 1 + (port_bit.at(d).wire->port_output ? 1 : 0))
+					continue;
+			}
 			// LSE keeps a flip-flop with a synchronous reset/set in the fabric unless the
 			// port asks for the I/O register (syn_useioff)
 			if (t.in(ID(SB_DFFSR), ID(SB_DFFESR), ID(SB_DFFSS), ID(SB_DFFESS)) && !useioff_attr.count(bit))
@@ -147,7 +172,7 @@ struct Ice40IopackPass : public Pass {
 			else if (t.in(ID(SB_DFFSS), ID(SB_DFFESS)))
 				d = lut({d, ff->getPort(ID::S)}, 0x000e);
 			Cell *io = new_io(port_bit.at(bit), 0b0101, in_unused);
-			io->setPort(ID(OUTPUT_CLK), ff->getPort(ID::C));
+			set_clock(io, ID(OUTPUT_CLK), ff);
 			io->setPort(ID(D_OUT_0), d);
 			if (ff->hasPort(ID::E))
 				io->setPort(ID(CLOCK_ENABLE), ff->getPort(ID::E));
@@ -175,11 +200,8 @@ struct Ice40IopackPass : public Pass {
 					continue;
 				tbuf = it->second.first;
 			}
-			SigBit clk = ff->getPort(ID::C);
-			if (t.in(ID(SB_DFFN), ID(SB_DFFNE)))
-				clk = invert_clock(clk);
 			Cell *io = new_io(port_bit.at(d), tbuf ? 0b1010 : 0b0000, 0b00);
-			io->setPort(ID(INPUT_CLK), clk);
+			set_clock(io, ID(INPUT_CLK), ff);
 			io->setPort(ID(D_IN_0), ff->getPort(ID::Q));
 			if (ff->hasPort(ID::E))
 				io->setPort(ID(CLOCK_ENABLE), ff->getPort(ID::E));
@@ -206,12 +228,9 @@ struct Ice40IopackPass : public Pass {
 			if (d.wire == nullptr || nusers[d] != 1 || !ff_by_d.count(d) || pt[0] != State::S1 || pt[1] != State::S0)
 				continue;
 			Cell *ff = ff_by_d.at(d);
-			SigBit clk = ff->getPort(ID::C);
-			if (ff->type.in(ID(SB_DFFN), ID(SB_DFFNE)))
-				clk = invert_clock(clk);
 			pt.bits()[0] = State::S0;
 			io->setParam(ID(PIN_TYPE), pt);
-			io->setPort(ID(INPUT_CLK), clk);
+			set_clock(io, ID(INPUT_CLK), ff);
 			io->setPort(ID(D_IN_0), ff->getPort(ID::Q));
 			if (ff->hasPort(ID::E))
 				io->setPort(ID(CLOCK_ENABLE), ff->getPort(ID::E));
