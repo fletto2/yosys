@@ -1797,7 +1797,8 @@ struct Ice40LseTwoWayPass : public Pass {
 		log("A tree of $mux cells (inner ones read only by the tree) whose data inputs are\n");
 		log("just two words W0 and W1 (and don't-cares) becomes one $mux between them. Its\n");
 		log("select is the same tree built one bit wide with W0 = 0 and W1 = 1, shared by\n");
-		log("all bits.\n");
+		log("all bits. Over three or four words it becomes a 4:1 multiplexer whose two\n");
+		log("selects are the leaf index bits, built the same way.\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -1872,8 +1873,34 @@ struct Ice40LseTwoWayPass : public Pass {
 					nodes++;
 					walk(sigmap(root->getPort(ID::A)));
 					walk(sigmap(root->getPort(ID::B)));
-					if (nodes < 2 || GetSize(leaves) != 2 || leaves[0].is_fully_const() || leaves[1].is_fully_const())
+					bool has_const = false;
+					for (auto &l : leaves)
+						if (l.is_fully_const()) has_const = true;
+					int k = GetSize(leaves);
+					if (has_const || k < 2 || k > 4 || (k > 2 && nodes <= 3) || nodes < 2)
 						continue;
+					if (k > 2) {
+						// encoded 4:1: leaf index bits as one-bit trees
+						std::function<SigBit(SigSpec, int)> idx_tree = [&](SigSpec sig, int bitn) -> SigBit {
+							for (int li = 0; li < k; li++)
+								if (sig == leaves[li]) return (li >> bitn) & 1 ? State::S1 : State::S0;
+							if (sig.is_fully_undef()) return State::Sx;
+							Cell *m = mux_of.at(sig);
+							SigBit a = idx_tree(sigmap(m->getPort(ID::A)), bitn), b = idx_tree(sigmap(m->getPort(ID::B)), bitn);
+							return module->MuxGate(NEW_ID, a, b, m->getPort(ID::S).as_bit());
+						};
+						SigBit e0 = idx_tree(ry, 0), e1 = idx_tree(ry, 1);
+						SigSpec l3 = k > 3 ? leaves[3] : SigSpec(State::Sx, GetSize(ry));
+						SigSpec m0 = module->Mux(NEW_ID, leaves[0], leaves[1], e0);
+						SigSpec m1 = module->Mux(NEW_ID, leaves[2], l3, e0);
+						SigSpec y = root->getPort(ID::Y);
+						module->remove(root);
+						module->addMux(NEW_ID, m0, m1, e1, y);
+						log("  %s: %d multiplexers over %d words\n", log_signal(y), nodes, k);
+						count++;
+						changed = true;
+						break;
+					}
 					// the select: the tree one bit wide, W0 -> 0, W1 -> 1
 					std::function<SigBit(SigSpec)> bit_tree = [&](SigSpec sig) -> SigBit {
 						if (sig == leaves[0]) return State::S0;
