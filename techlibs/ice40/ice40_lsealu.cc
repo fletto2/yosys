@@ -129,6 +129,28 @@ struct Ice40LseAddEnablePass : public Pass {
 					pmux_of_y[sigmap(cell->getPort(ID::Y))] = cell;
 			dict<SigSpec, SigSpec> ff_q_of_d;
 			pool<SigSpec> behind_const;
+			// next-state nets read by more than their flip-flop
+			dict<SigBit, int> nreaders;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->input(conn.first))
+						for (auto b : sigmap(conn.second))
+							nreaders[b]++;
+			for (auto w : module->wires())
+				if (w->port_output)
+					for (auto b : sigmap(SigSpec(w)))
+						nreaders[b]++;
+			pool<SigSpec> exported;
+			for (auto cell : module->cells())
+				if (cell->type.in(ID($adff), ID($adffe))) {
+					SigSpec d = sigmap(cell->getPort(ID::D));
+					bool all = GetSize(d) > 0;
+					for (auto b : d)
+						if (!b.wire || nreaders[b] < 2)
+							all = false;
+					if (all)
+						exported.insert(d);
+				}
 			// registers that address a memory: LSE folds their enable (and reset) into logic
 			pool<SigBit> mem_addr;
 			for (auto cell : module->cells())
@@ -159,6 +181,10 @@ struct Ice40LseAddEnablePass : public Pass {
 					// with an async reset, LSE also keeps the enable when the add is one of
 					// several next-state choices (a load in front of it)
 					if (!cell->type.in(ID($adff), ID($adffe)))
+						continue;
+					// ... but not when the next state is a net other logic reads (a RAM address
+					// computed one cycle ahead): that net is (ld ? x : q) + inc either way
+					if (exported.count(sigmap(cell->getPort(ID::D))))
 						continue;
 					std::vector<SigSpec> todo = {sigmap(cell->getPort(ID::D))};
 					pool<SigSpec> seen;
@@ -249,9 +275,21 @@ struct Ice40LseAddEnablePass : public Pass {
 				if (behind_const.count(py))
 					continue;
 				SigSpec q = sigmap(pm->getPort(ID::A));
+				SigSpec pb = pm->getPort(ID::B), ps = pm->getPort(ID::S);
+				// a full case whose next state is read elsewhere: the hold is one of the arms.
+				// The selects are exclusive, so the increment arm becomes a hold and the
+				// output gets + (arm ? K : 0), as LSE builds (ld ? x : q) + inc
+				bool full = false;
+				if (q.is_fully_undef() && exported.count(py) && ff_q_of_d.count(py)) {
+					SigSpec fq = ff_q_of_d.at(py);
+					for (int i = 0; i + GetSize(fq) <= GetSize(pb); i += GetSize(fq))
+						if (sigmap(pb.extract(i, GetSize(fq))) == fq)
+							full = true;
+					if (full)
+						q = fq;
+				}
 				if (ff_q_of_d.count(py) && q != ff_q_of_d.at(py))
 					continue;
-				SigSpec pb = pm->getPort(ID::B), ps = pm->getPort(ID::S);
 				int w = GetSize(q), n = GetSize(ps);
 				for (int i = 0; i < n; i++) {
 					SigSpec sum = sigmap(pb.extract(i * w, w));
@@ -284,6 +322,22 @@ struct Ice40LseAddEnablePass : public Pass {
 					nadd->setPort(ID::B, kport == ID::B ? gated : add->getPort(ID::B));
 					Wire *ny = module->addWire(NEW_ID, GetSize(y));
 					nadd->setPort(ID::Y, ny);
+					if (full) {
+						// y = pmux(arm i -> q) + gated, with the adder taking the pmux output
+						SigSpec npb = pb;
+						npb.replace(i * w, q);
+						pm->setPort(ID::B, npb);
+						SigSpec hold = module->addWire(NEW_ID, w);
+						module->connect(pm->getPort(ID::Y), SigSpec(ny).extract(0, w));
+						pm->setPort(ID::Y, hold);
+						SigSpec opq = hold;
+						if (GetSize(y) > w)
+							opq.append(SigSpec(State::S0, GetSize(y) - w));
+						nadd->setPort(kport == ID::B ? ID::A : ID::B, opq);
+						nadd->setParam(kport == ID::B ? ID::A_WIDTH : ID::B_WIDTH, GetSize(opq));
+						count++;
+						break;
+					}
 					SigSpec nb, ns;
 					for (int j = 0; j < n; j++)
 						if (j != i) {
