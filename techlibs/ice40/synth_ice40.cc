@@ -63,12 +63,8 @@ struct SynthIce40Pass : public ScriptPass
 		log("        from label is synonymous to 'begin', and empty to label is\n");
 		log("        synonymous to the end of the command list.\n");
 		log("\n");
-		log("    -flatten\n");
-		log("        flatten the design before synthesis. LSE keeps the module boundaries,\n");
-		log("        so by default the design is not flattened\n");
-		log("\n");
 		log("    -noflatten\n");
-		log("        do not flatten design before synthesis (the default)\n");
+		log("        do not flatten design before synthesis\n");
 		log("\n");
 
 		log("    -nocarry\n");
@@ -130,7 +126,7 @@ struct SynthIce40Pass : public ScriptPass
 		nobram = false;
 		spram = false;
 		dsp = true;
-		flatten = false;
+		flatten = true;
 		noabc = false;
 		vpr = false;
 		device_opt = "hx";
@@ -288,11 +284,14 @@ struct SynthIce40Pass : public ScriptPass
 			run("opt_merge");
 		}
 
-		if (check_label("flatten"))
+		// LSE writes a hierarchical netlist but optimises across the module
+		// boundaries (a parent's gate merges into its child's LUT and back), so
+		// flatten; syn_hier="hard" modules keep their boundary (keep_hierarchy)
+		if (check_label("flatten", "(unless -noflatten)"))
 		{
 			if (flatten || help_mode) {
-				run("check", "                 (if -flatten)");
-				run("flatten", "               (if -flatten)");
+				run("check");
+				run("flatten");
 			}
 			// with or without flattening: a `x ? y : 'bz' on a top-level inout must
 			// stay a tristate buffer for the pad, not become plain logic
