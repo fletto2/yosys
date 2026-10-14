@@ -200,6 +200,32 @@ struct Ice40IopackPass : public Pass {
 				"-ignore SB_IO PACKAGE_PIN -ignore SB_IO_I3C PACKAGE_PIN -ignore SB_IO_OD PACKAGEPIN "
 				"-ignore SB_RGBA_DRV RGB0 -ignore SB_RGBA_DRV RGB1 -ignore SB_RGBA_DRV RGB2 "
 				"-ignore SB_RGB_DRV RGB0 -ignore SB_RGB_DRV RGB1 -ignore SB_RGB_DRV RGB2 %s", log_id(module)));
+		// LSE makes no pad for an input bit that nothing reads
+		{
+			SigMap sm(module);
+			pool<SigBit> read;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections()) {
+					// the pad cells are not known cells: their Y and P are no readers
+					if (cell->type.begins_with("$__ICE40_IOPACK_") && conn.first.in(ID::Y, ID::P))
+						continue;
+					if (!cell->output(conn.first))
+						for (auto b : sm(conn.second))
+							read.insert(b);
+				}
+			for (auto w : module->wires())
+				if (w->port_output)
+					for (auto b : sm(SigSpec(w)))
+						read.insert(b);
+			std::vector<Cell*> unread;
+			for (auto cell : module->cells())
+				if (cell->type == ID($__ICE40_IOPACK_IN) && !read.count(sm(cell->getPort(ID::Y).as_bit())))
+					unread.push_back(cell);
+			for (auto cell : unread)
+				module->remove(cell);
+			if (!unread.empty())
+				log("Removed %d pads of unread inputs.\n", GetSize(unread));
+		}
 		Pass::call(design, stringf("techmap -map +/ice40/iopack_map.v -D IOPACK_PULLUP=1 %s", log_id(module)));
 	}
 } Ice40IopackPass;
