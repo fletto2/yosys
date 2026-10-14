@@ -1,9 +1,10 @@
 module $__ICE40_RAM4K_ (...);
 
 parameter INIT = 0;
-parameter OPTION_HAS_BE = 1;
-parameter PORT_R_WIDTH = 16;
-parameter PORT_W_WIDTH = 16;
+parameter OPTION_HAS_BE = 0;
+parameter WIDTH = 16;
+parameter PORT_R_WIDTH = WIDTH;
+parameter PORT_W_WIDTH = WIDTH;
 parameter PORT_W_WR_BE_WIDTH = 16;
 parameter PORT_R_CLK_POL = 1;
 parameter PORT_W_CLK_POL = 1;
@@ -22,6 +23,8 @@ input [PORT_W_WIDTH-1:0] PORT_W_WR_DATA;
 wire [15:0] RDATA;
 wire [15:0] WDATA;
 wire [15:0] MASK;
+// without byte enables every bit is written
+wire [15:0] WR_BE = OPTION_HAS_BE ? PORT_W_WR_BE : 16'hffff;
 // LSE wires a RAM whose ports have the same width straight through: the address
 // goes to RADDR/WADDR as is and data bit b to the pin that mode uses for it
 // (DPIN). The bit-reversed order of the generic mapping lets mixed widths share
@@ -113,7 +116,7 @@ if (DIRECT) begin
 		assign PORT_R_RD_DATA[b] = RDATA[DPIN(b)];
 		assign WDATA[DPIN(b)] = PORT_W_WR_DATA[b];
 		if (W == 16)
-			assign MASK[b] = !PORT_W_WR_BE[b];
+			assign MASK[b] = !WR_BE[b];
 	end
 end else begin
 case(PORT_R_WIDTH)
@@ -213,22 +216,22 @@ case(PORT_W_WIDTH)
 				PORT_W_WR_DATA[0]
 			};
 			assign MASK = ~{
-				PORT_W_WR_BE[15],
-				PORT_W_WR_BE[7],
-				PORT_W_WR_BE[11],
-				PORT_W_WR_BE[3],
-				PORT_W_WR_BE[13],
-				PORT_W_WR_BE[5],
-				PORT_W_WR_BE[9],
-				PORT_W_WR_BE[1],
-				PORT_W_WR_BE[14],
-				PORT_W_WR_BE[6],
-				PORT_W_WR_BE[10],
-				PORT_W_WR_BE[2],
-				PORT_W_WR_BE[12],
-				PORT_W_WR_BE[4],
-				PORT_W_WR_BE[8],
-				PORT_W_WR_BE[0]
+				WR_BE[15],
+				WR_BE[7],
+				WR_BE[11],
+				WR_BE[3],
+				WR_BE[13],
+				WR_BE[5],
+				WR_BE[9],
+				WR_BE[1],
+				WR_BE[14],
+				WR_BE[6],
+				WR_BE[10],
+				WR_BE[2],
+				WR_BE[12],
+				WR_BE[4],
+				WR_BE[8],
+				WR_BE[0]
 			};
 		end
 	end
