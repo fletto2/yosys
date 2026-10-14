@@ -474,8 +474,9 @@ struct Ice40LseRamCePass : public Pass {
 			// in a syn_hier="hard" module, a flip-flop with one load value made from at most
 			// two module inputs by plain logic (no flip-flop or RAM in between, so the hold
 			// mux fits a LUT4 with Q and the enable) gets no enable either; a second load
-			// value shows up as signals shared by D and the enable
-			bool hard = module->get_string_attribute(ID(syn_hier)) == "hard";
+			// value shows up as signals shared by D and the enable. Not at the top: synthesized
+			// on its own, such a module keeps these enables
+			bool hard = module->get_string_attribute(ID(syn_hier)) == "hard" && !module->get_bool_attribute(ID::top);
 			dict<SigBit, Cell*> gate_of;
 			pool<SigBit> inputs;
 			if (hard) {
