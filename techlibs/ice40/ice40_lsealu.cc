@@ -559,9 +559,10 @@ struct Ice40LseRamCePass : public Pass {
 			// a register that addresses a RAM gets neither a clock enable nor a synchronous
 			// reset/set pin: LSE builds both into the logic in front of it
 			pool<SigBit> addr_bits;
+			// (EBR only: LSE keeps the enable of an SPRAM address register)
 			for (auto cell : module->cells())
-				if (is_ram(cell))
-					for (auto port : {ID(RADDR), ID(WADDR), ID(ADDRESS)})
+				if (is_ram(cell) && cell->type != ID(SB_SPRAM256KA))
+					for (auto port : {ID(RADDR), ID(WADDR)})
 						if (cell->hasPort(port))
 							for (auto b : sigmap(cell->getPort(port)))
 								addr_bits.insert(b);

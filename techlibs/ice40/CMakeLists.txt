@@ -6,6 +6,9 @@ yosys_pass(ice40_lsealu
 	REQUIRES
 		techmap
 )
+yosys_pass(ice40_radiant
+	ice40_radiant.cc
+)
 yosys_pass(ice40_iopack
 	ice40_iopack.cc
 	REQUIRES
@@ -96,4 +99,5 @@ yosys_pass(synth_ice40
 		abc9_model.v
 		iopack_map.v
 		lse_mux_map.v
+		radiant_cells.v
 )

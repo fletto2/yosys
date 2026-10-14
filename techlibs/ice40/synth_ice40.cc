@@ -275,7 +275,10 @@ struct SynthIce40Pass : public ScriptPass
 		if (check_label("begin"))
 		{
 			run("read_verilog " + define + " -lib -specify +/ice40/cells_sim.v");
+			// Radiant's iCE40UP primitives, for designs written for LSE
+			run("read_verilog -lib -nooverwrite +/ice40/radiant_cells.v");
 			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt));
+			run("ice40_radiant");
 			run("proc -latches " + (latches == "info" ? std::string("info") : std::string("warn")));
 			// before opt_merge shares a compared multiplexer with an identical one
 			run("ice40_lsemuxcmp");

@@ -197,7 +197,9 @@ struct Ice40IopackPass : public Pass {
 
 		Pass::call(design, stringf("iopadmap -bits -inpad $__ICE40_IOPACK_IN Y:P -outpad $__ICE40_IOPACK_OUT A:P "
 				"-toutpad $__ICE40_IOPACK_TOUT E:A:P -tinoutpad $__ICE40_IOPACK_TINOUT E:Y:A:P "
-				"-ignore SB_IO PACKAGE_PIN %s", log_id(module)));
+				"-ignore SB_IO PACKAGE_PIN -ignore SB_IO_I3C PACKAGE_PIN -ignore SB_IO_OD PACKAGEPIN "
+				"-ignore SB_RGBA_DRV RGB0 -ignore SB_RGBA_DRV RGB1 -ignore SB_RGBA_DRV RGB2 "
+				"-ignore SB_RGB_DRV RGB0 -ignore SB_RGB_DRV RGB1 -ignore SB_RGB_DRV RGB2 %s", log_id(module)));
 		Pass::call(design, stringf("techmap -map +/ice40/iopack_map.v -D IOPACK_PULLUP=1 %s", log_id(module)));
 	}
 } Ice40IopackPass;
