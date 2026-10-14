@@ -2,9 +2,15 @@ module $__ICE40_RAM4K_ (...);
 
 parameter INIT = 0;
 parameter OPTION_HAS_BE = 0;
+// 16-bit mode (both ports 16 wide, passed as WIDTH) or narrower per-port widths
+parameter OPTION_WIDE = 0;
 parameter WIDTH = 16;
-parameter PORT_R_WIDTH = WIDTH;
-parameter PORT_W_WIDTH = WIDTH;
+parameter PORT_R_WIDTH = 16;
+parameter PORT_W_WIDTH = 16;
+parameter _TECHMAP_CONSTMSK_PORT_W_WR_EN_ = 0;
+parameter _TECHMAP_CONSTVAL_PORT_W_WR_EN_ = 0;
+// a ROM has no write port: its write mode follows the read width, as with LSE
+localparam W_WIDTH = (_TECHMAP_CONSTMSK_PORT_W_WR_EN_ && !_TECHMAP_CONSTVAL_PORT_W_WR_EN_) ? PORT_R_WIDTH : PORT_W_WIDTH;
 parameter PORT_W_WR_BE_WIDTH = 16;
 parameter PORT_R_CLK_POL = 1;
 parameter PORT_W_CLK_POL = 1;
@@ -30,7 +36,7 @@ wire [15:0] WR_BE = OPTION_HAS_BE ? PORT_W_WR_BE : 16'hffff;
 // (DPIN). The bit-reversed order of the generic mapping lets mixed widths share
 // one INIT layout, which LSE does not do.
 `ifdef LSE
-localparam DIRECT = PORT_R_WIDTH == PORT_W_WIDTH;
+localparam DIRECT = PORT_R_WIDTH == W_WIDTH;
 `else
 localparam DIRECT = 0;
 `endif
@@ -44,8 +50,10 @@ function integer DPIN;
 	DPIN = W == 16 ? b : W == 8 ? 2*b : W == 4 ? 4*b + 1 : 8*b + 3;
 endfunction
 
-wire [10:0] RADDR = DIRECT ? PORT_R_ADDR >> SH : {PORT_R_ADDR[0], PORT_R_ADDR[1], PORT_R_ADDR[2], PORT_R_ADDR[10:3]};
-wire [10:0] WADDR = DIRECT ? PORT_W_ADDR >> SH : {PORT_W_ADDR[0], PORT_W_ADDR[1], PORT_W_ADDR[2], PORT_W_ADDR[10:3]};
+// (with OPTION_WIDE the address comes as a plain word address)
+localparam ASH = OPTION_WIDE ? 0 : SH;
+wire [10:0] RADDR = DIRECT ? PORT_R_ADDR >> ASH : {PORT_R_ADDR[0], PORT_R_ADDR[1], PORT_R_ADDR[2], PORT_R_ADDR[10:3]};
+wire [10:0] WADDR = DIRECT ? PORT_W_ADDR >> ASH : {PORT_W_ADDR[0], PORT_W_ADDR[1], PORT_W_ADDR[2], PORT_W_ADDR[10:3]};
 
 function [1:0] mode;
 	input integer width;
@@ -93,7 +101,7 @@ endfunction
 		.INIT_E(slice_init(14)), \
 		.INIT_F(slice_init(15)), \
 		.READ_MODE(mode(PORT_R_WIDTH)), \
-		.WRITE_MODE(mode(PORT_W_WIDTH)) \
+		.WRITE_MODE(mode(W_WIDTH)) \
 	) _TECHMAP_REPLACE_ ( \
 		.RDATA(RDATA), \
 		.rclk(PORT_R_CLK), \
@@ -168,7 +176,7 @@ case(PORT_R_WIDTH)
 	end
 endcase
 
-case(PORT_W_WIDTH)
+case(W_WIDTH)
 	2: begin
 		assign {
 			WDATA[11],

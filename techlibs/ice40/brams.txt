@@ -1,8 +1,15 @@
 # LSE never uses the per-bit write masks for inferred memories: a memory written in
 # parts becomes one RAM per part (byte enables -> 8-bit wide RAMs)
 ram block $__ICE40_RAM4K_ {
-	abits 11;
-	widths 2 4 8 16 global;
+	# 16-bit mode only with both ports 16 bits wide; LSE splits other mixed widths
+	option "WIDE" 1 {
+		abits 8;
+		widths 16 global;
+	}
+	option "WIDE" 0 {
+		abits 11;
+		widths 2 4 8 per_port;
+	}
 	cost 64;
 	init any;
 	port sw "W" {
