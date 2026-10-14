@@ -304,6 +304,7 @@ struct SynthIce40Pass : public ScriptPass
 		{
 			run("ice40_lseconst");
 			run("ice40_lseaddenable");
+			run("ice40_lseaddload");
 			run("opt_expr");
 			run("opt_clean");
 			run("check");

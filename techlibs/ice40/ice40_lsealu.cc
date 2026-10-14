@@ -2052,4 +2052,123 @@ struct Ice40LseAndSrPass : public Pass {
 	}
 } Ice40LseAndSrPass;
 
+struct Ice40LseAddLoadPass : public Pass {
+	Ice40LseAddLoadPass() : Pass("ice40_lseaddload", "fold a load next to an adder into the adder's operands, as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lseaddload [selection]\n");
+		log("\n");
+		log("A counter q <= s ? X : (q + K), K a constant or one signal bit (an enable\n");
+		log("folded in) and X not constant, becomes q <= (s ? 0 : q) + (s ? X : K): the\n");
+		log("load goes through the adder, the operands gated in front of the carry chain.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEADDLOAD pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, int> nreaders;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->input(conn.first))
+						for (auto b : sigmap(conn.second))
+							nreaders[b]++;
+			for (auto w : module->wires())
+				if (w->port_output)
+					for (auto b : sigmap(SigSpec(w)))
+						nreaders[b]++;
+			dict<SigSpec, Cell*> add_of;
+			for (auto cell : module->cells())
+				if (cell->type == ID($add))
+					add_of[sigmap(cell->getPort(ID::Y))] = cell;
+			int count = 0;
+			std::vector<Cell*> muxes;
+			for (auto cell : module->selected_cells())
+				if (cell->type == ID($mux))
+					muxes.push_back(cell);
+			for (auto mux : muxes) {
+				int width = GetSize(mux->getPort(ID::Y));
+				for (int side = 0; side < 2; side++) {
+					SigSpec sum = sigmap(mux->getPort(side ? ID::B : ID::A));
+					if (!add_of.count(sum))
+						continue;
+					Cell *add = add_of.at(sum);
+					bool only = true;
+					for (auto b : sum)
+						if (nreaders[b] != 1) only = false;
+					if (!only || GetSize(add->getPort(ID::Y)) != width)
+						continue;
+					bool sgn = add->getParam(ID::A_SIGNED).as_bool() && add->getParam(ID::B_SIGNED).as_bool();
+					SigSpec p = add->getPort(ID::A), k = add->getPort(ID::B);
+					p.extend_u0(width, sgn);
+					k.extend_u0(width, sgn);
+					SigSpec x = mux->getPort(side ? ID::A : ID::B);
+					SigBit s = mux->getPort(ID::S).as_bit();
+					// only a counter: the register plus a constant (or the enable folded into
+					// it), loaded with data rather than cleared
+					if (sigmap(x).is_fully_const() || sigmap(x) == sigmap(p))
+						continue;
+					SigSpec y0 = sigmap(mux->getPort(ID::Y));
+					bool counter = false;
+					for (auto ff : module->cells())
+						if (RTLIL::builtin_ff_cell_types().count(ff->type) && ff->hasPort(ID::D) &&
+								sigmap(ff->getPort(ID::D)) == y0 && sigmap(ff->getPort(ID::Q)) == sigmap(p))
+							counter = true;
+					if (!counter)
+						continue;
+					// K: a constant, or depending on one signal only (en ? c : 0)
+					pool<SigBit> vars;
+					pool<Cell*> seen;
+					std::vector<SigBit> stack;
+					for (auto b : sigmap(k)) stack.push_back(b);
+					while (!stack.empty() && GetSize(vars) <= 1) {
+						SigBit b = stack.back();
+						stack.pop_back();
+						if (!b.wire)
+							continue;
+						Cell *d = nullptr;
+						for (auto c : module->cells())
+							if (c->type.in(ID($mux), ID($not), ID($logic_not), ID($and), ID($or), ID($xor), ID($pos)))
+								for (auto &conn : c->connections())
+									if (c->output(conn.first))
+										for (auto ob : sigmap(conn.second))
+											if (ob == b) d = c;
+						if (!d) { vars.insert(b); continue; }
+						if (seen.count(d))
+							continue;
+						seen.insert(d);
+						for (auto &conn : d->connections())
+							if (d->input(conn.first))
+								for (auto ib : sigmap(conn.second))
+									stack.push_back(ib);
+					}
+					if (GetSize(vars) > 1)
+						continue;
+					// the sum is taken when s selects its side; the load otherwise
+					SigSpec zero(State::S0, width);
+					SigSpec np = side ? module->Mux(NEW_ID, zero, p, s) : module->Mux(NEW_ID, p, zero, s);
+					SigSpec nk = side ? module->Mux(NEW_ID, x, k, s) : module->Mux(NEW_ID, k, x, s);
+					add->setPort(ID::A, np);
+					add->setPort(ID::B, nk);
+					add->setParam(ID::A_WIDTH, width);
+					add->setParam(ID::B_WIDTH, width);
+					add->setParam(ID::A_SIGNED, false);
+					add->setParam(ID::B_SIGNED, false);
+					SigSpec y = mux->getPort(ID::Y);
+					log("  %s: load %s\n", log_signal(y), log_signal(x));
+					module->remove(mux);
+					module->connect(y, add->getPort(ID::Y));
+					count++;
+					break;
+				}
+			}
+			log("%s: %d loads folded into adders.\n", log_id(module), count);
+		}
+	}
+} Ice40LseAddLoadPass;
+
 PRIVATE_NAMESPACE_END
