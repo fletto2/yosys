@@ -302,6 +302,7 @@ struct SynthIce40Pass : public ScriptPass
 		if (check_label("coarse"))
 		{
 			run("ice40_lseconst");
+			run("ice40_lsewrap");
 			run("ice40_lseaddenable");
 			run("ice40_lseaddload");
 			run("opt_expr");

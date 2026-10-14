@@ -2813,4 +2813,87 @@ struct Ice40LseOneHotMuxPass : public Pass {
 	}
 } Ice40LseOneHotMuxPass;
 
+struct Ice40LseWrapPass : public Pass {
+	Ice40LseWrapPass() : Pass("ice40_lsewrap", "drop a wrap-around compare that the adder does anyway, as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsewrap [selection]\n");
+		log("\n");
+		log("x == C ? K : x + D, with C + D == K modulo the width of the result, is x + D\n");
+		log("(dacif: div_r == 255 ? 0 : div_r + 1 on 8 bits). LSE builds the plain adder; this\n");
+		log("pass connects the multiplexer output to the adder (likewise for -).\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEWRAP pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, Cell*> driver;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->output(conn.first))
+						for (auto b : sigmap(conn.second))
+							driver[b] = cell;
+			auto drv = [&](const SigSpec &sig) -> Cell* {
+				if (GetSize(sig) == 0 || !driver.count(sig[0]))
+					return nullptr;
+				Cell *c = driver.at(sig[0]);
+				if (!c->hasPort(ID::Y))
+					return nullptr;
+				SigSpec y = sigmap(c->getPort(ID::Y));
+				return GetSize(y) >= GetSize(sig) && y.extract(0, GetSize(sig)) == sig ? c : nullptr;
+			};
+			int count = 0;
+			std::vector<Cell*> muxes;
+			for (auto cell : module->selected_cells())
+				if (cell->type == ID($mux))
+					muxes.push_back(cell);
+			for (auto mux : muxes) {
+				int w = GetSize(mux->getPort(ID::Y));
+				SigSpec a = sigmap(mux->getPort(ID::A)), b = sigmap(mux->getPort(ID::B));
+				SigSpec sel = sigmap(mux->getPort(ID::S));
+				Cell *eq = drv(sel);
+				if (!eq || eq->type != ID($eq))
+					continue;
+				// the constant arm is B (selected when equal), the adder is A
+				if (!b.is_fully_const() || !b.is_fully_def())
+					continue;
+				Cell *add = drv(a);
+				if (!add || !add->type.in(ID($add), ID($sub)) || add->getParam(ID::A_SIGNED).as_bool())
+					continue;
+				SigSpec x = sigmap(add->getPort(ID::A)), dsig = sigmap(add->getPort(ID::B));
+				if (!dsig.is_fully_const())
+					continue;
+				SigSpec ea = sigmap(eq->getPort(ID::A)), eb = sigmap(eq->getPort(ID::B));
+				if (ea.is_fully_const())
+					std::swap(ea, eb);
+				if (!eb.is_fully_const() || !eb.is_fully_def())
+					continue;
+				// the compare must be on the whole of x, zero-extended alike
+				int xw = GetSize(x);
+				SigSpec xe = x, ee = ea;
+				xe.extend_u0(std::max(xw, GetSize(ea)));
+				ee.extend_u0(std::max(xw, GetSize(ea)));
+				if (xe != ee || w > xw)
+					continue;
+				if (w > 32 || GetSize(eb) > 32 || GetSize(dsig) > 32 || GetSize(b) > 32)
+					continue;
+				uint64_t m = (1ULL << w) - 1;
+				uint64_t c = (uint32_t)eb.as_const().as_int(), d = (uint32_t)dsig.as_const().as_int(), k = (uint32_t)b.as_const().as_int();
+				uint64_t r = add->type == ID($add) ? c + d : c - d;
+				if ((r & m) != (k & m))
+					continue;
+				module->connect(mux->getPort(ID::Y), a);
+				module->remove(mux);
+				count++;
+			}
+			log("%s: %d wrap-around compares dropped.\n", log_id(module), count);
+		}
+	}
+} Ice40LseWrapPass;
+
 PRIVATE_NAMESPACE_END
