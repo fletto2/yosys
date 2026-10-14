@@ -2705,4 +2705,86 @@ struct Ice40LseMemLogicPass : public Pass {
 	}
 } Ice40LseMemLogicPass;
 
+struct Ice40LseOneHotMuxPass : public Pass {
+	Ice40LseOneHotMuxPass() : Pass("ice40_lseonehotmux", "mark the cases on state machines that Lattice LSE builds as AND-OR") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lseonehotmux [selection]\n");
+		log("\n");
+		log("Marks (attribute lse_andor) every $pmux whose selects are all ORs of the states\n");
+		log("of an extracted state machine (fsm_map's per-state decode) and that has a\n");
+		log("don't-care arm. LSE builds such a case on its one-hot state register as an\n");
+		log("AND-OR of (states & word), not as the binary multiplexer tree it builds for other\n");
+		log("cases; synth_ice40 leaves these out of pmuxtree.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEONEHOTMUX pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			pool<SigBit> states;
+			for (auto w : module->wires())
+				if (w->get_bool_attribute(ID(fsm_state_decode)))
+					for (auto b : sigmap(SigSpec(w)))
+						states.insert(b);
+			if (states.empty())
+				continue;
+			dict<SigBit, Cell*> driver;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->output(conn.first))
+						for (auto b : sigmap(conn.second))
+							driver[b] = cell;
+			// a select made only of OR gates over the states
+			dict<SigBit, bool> memo;
+			std::function<bool(SigBit, int)> from_state = [&](SigBit b, int depth) -> bool {
+				b = sigmap(b);
+				if (states.count(b))
+					return true;
+				if (memo.count(b))
+					return memo.at(b);
+				bool ok = false;
+				Cell *c = driver.count(b) ? driver.at(b) : nullptr;
+				if (c && depth < 8 && c->type.in(ID($reduce_or), ID($or), ID($logic_or), ID($_OR_), ID($reduce_bool))) {
+					ok = true;
+					for (auto &conn : c->connections())
+						if (c->input(conn.first))
+							for (auto x : sigmap(conn.second))
+								if (!x.wire || !from_state(x, depth + 1))
+									ok = false;
+				}
+				memo[b] = ok;
+				return ok;
+			};
+			int count = 0;
+			for (auto cell : module->selected_cells()) {
+				if (cell->type != ID($pmux))
+					continue;
+				int w = cell->getParam(ID::WIDTH).as_int();
+				SigSpec a = sigmap(cell->getPort(ID::A)), b = sigmap(cell->getPort(ID::B));
+				// a case with a don't-care arm (DECODE, ABS1: AI = 8'hxx)
+				bool dc = false;
+				for (int i = 0; i + w <= GetSize(b); i += w)
+					if (b.extract(i, w).is_fully_undef())
+						dc = true;
+				if (!dc)
+					continue;
+				bool all = true;
+				for (auto s : sigmap(cell->getPort(ID::S)))
+					if (!s.wire || !from_state(s, 0))
+						all = false;
+				if (all) {
+					cell->set_bool_attribute(ID(lse_andor));
+					count++;
+				}
+			}
+			log("%s: %d cases on state machines kept as AND-OR.\n", log_id(module), count);
+		}
+	}
+} Ice40LseOneHotMuxPass;
+
 PRIVATE_NAMESPACE_END

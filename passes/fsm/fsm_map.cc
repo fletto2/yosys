@@ -192,6 +192,8 @@ static void map_fsm(RTLIL::Cell *fsm_cell, RTLIL::Module *module)
 	bool encoding_is_onehot = true;
 
 	RTLIL::Wire *state_onehot = module->addWire(NEW_ID, fsm_data.state_table.size());
+	// one bit per state (ice40_lseonehotmux finds the cases on the state through it)
+	state_onehot->set_bool_attribute(ID(fsm_state_decode));
 
 	for (size_t i = 0; i < fsm_data.state_table.size(); i++)
 	{

@@ -311,8 +311,9 @@ struct SynthIce40Pass : public ScriptPass
 			run("fsm -lse");
 			// LSE builds case statements as binary mux trees on the select bits
 			// (after fsm, which needs the original $pmux structure)
-			run("pmux2shiftx");
-			run("pmuxtree");
+			run("ice40_lseonehotmux");
+			run("pmux2shiftx t:$pmux a:lse_andor %d");
+			run("pmuxtree t:$pmux a:lse_andor %d");
 			run("ice40_lsetoggle");
 			run("ice40_lseholdsel");
 			run("opt");
