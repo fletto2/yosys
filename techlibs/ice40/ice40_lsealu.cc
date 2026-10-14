@@ -2171,4 +2171,339 @@ struct Ice40LseAddLoadPass : public Pass {
 	}
 } Ice40LseAddLoadPass;
 
+struct Ice40LseHoldSelPass : public Pass {
+	Ice40LseHoldSelPass() : Pass("ice40_lseholdsel", "pick the data select of a two-word register as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lseholdsel [selection]\n");
+		log("\n");
+		log("A register whose next state is a $mux tree over two words and its own output\n");
+		log("(the hold), with a hold under both arms of the root, gets D = hold ? Q :\n");
+		log("(path ? W1 : W0), where W1 is the word under the root's 1 arm and path is the\n");
+		log("tree one bit wide with W1 = 1 and W0 = hold = 0. opt_dff then makes !hold the\n");
+		log("enable. LSE selects with that full path; with a hold under one arm only it\n");
+		log("drops the hold muxes, as opt_dff does.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSEHOLDSEL pass.\n");
+		for (auto module : design->selected_modules()) {
+			int count = 0;
+			SigMap sigmap(module);
+			dict<SigBit, int> nreaders;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->input(conn.first))
+						for (auto b : sigmap(conn.second))
+							nreaders[b]++;
+			for (auto w : module->wires())
+				if (w->port_output || w->get_bool_attribute(ID::keep))
+					for (auto b : sigmap(SigSpec(w)))
+						nreaders[b] += 2;
+			dict<SigSpec, Cell*> mux_of;
+			for (auto cell : module->cells())
+				if (cell->type == ID($mux))
+					mux_of[sigmap(cell->getPort(ID::Y))] = cell;
+			auto inner = [&](const SigSpec &sig) {
+				if (!mux_of.count(sig))
+					return false;
+				for (auto b : sig)
+					if (nreaders[b] != 1)
+						return false;
+				return true;
+			};
+			for (auto ff : module->selected_cells()) {
+				if (!ff->type.in(ID($dff), ID($adff)))
+					continue;
+				SigSpec d = sigmap(ff->getPort(ID::D)), q = sigmap(ff->getPort(ID::Q));
+				if (!mux_of.count(d))
+					continue;
+				Cell *root = mux_of.at(d);
+				std::vector<SigSpec> words;
+				bool ok = true;
+				std::function<bool(SigSpec)> walk = [&](SigSpec sig) -> bool {
+					if (sig == q)
+						return true;
+					if (inner(sig)) {
+						Cell *m = mux_of.at(sig);
+						bool ha = walk(sigmap(m->getPort(ID::A)));
+						bool hb = walk(sigmap(m->getPort(ID::B)));
+						return ha || hb;
+					}
+					if (sig.is_fully_undef() || sig.is_fully_const()) {
+						ok = false;
+						return false;
+					}
+					bool seen = false;
+					for (auto &w : words)
+						if (w == sig) seen = true;
+					if (!seen)
+						words.push_back(sig);
+					return false;
+				};
+				SigSpec ra = sigmap(root->getPort(ID::A)), rb = sigmap(root->getPort(ID::B));
+				bool hold_b = walk(rb);
+				int nb = GetSize(words);
+				bool hold_a = walk(ra);
+				if (!ok || !hold_a || !hold_b || GetSize(words) != 2 || nb != 1 || rb == q || ra == q)
+					continue;
+				SigSpec w1 = words[0], w0 = words[1];
+				// the tree one bit wide, with the given leaf values
+				std::function<SigBit(SigSpec, State, State, State)> bit_tree = [&](SigSpec sig, State v1, State v0, State vq) -> SigBit {
+					if (sig == q) return vq;
+					if (sig == w1) return v1;
+					if (sig == w0) return v0;
+					Cell *m = mux_of.at(sig);
+					SigBit a = bit_tree(sigmap(m->getPort(ID::A)), v1, v0, vq), b = bit_tree(sigmap(m->getPort(ID::B)), v1, v0, vq);
+					return module->MuxGate(NEW_ID, a, b, m->getPort(ID::S).as_bit());
+				};
+				SigBit path = bit_tree(d, State::S1, State::S0, State::S0);
+				SigBit hold = bit_tree(d, State::S0, State::S0, State::S1);
+				SigSpec data = module->Mux(NEW_ID, w0, w1, path);
+				SigSpec next = module->Mux(NEW_ID, data, ff->getPort(ID::Q), hold);
+				ff->setPort(ID::D, next);
+				log("  %s: select %s over %s and %s\n", log_id(ff), log_signal(path), log_signal(w1), log_signal(w0));
+				count++;
+			}
+			log("%s: %d register selects rebuilt.\n", log_id(module), count);
+		}
+	}
+} Ice40LseHoldSelPass;
+
+struct Ice40LseTogglePass : public Pass {
+	Ice40LseTogglePass() : Pass("ice40_lsetoggle", "turn a conditional register toggle into an XOR, as Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsetoggle [selection]\n");
+		log("\n");
+		log("s ? ~q : q on register outputs q becomes q ^ s before enables are extracted:\n");
+		log("LSE makes a toggle an XOR and takes only the conditions around it as the\n");
+		log("enable.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSETOGGLE pass.\n");
+		for (auto module : design->selected_modules()) {
+			int count = 0;
+			SigMap sigmap(module);
+			pool<SigBit> ff_q;
+			for (auto cell : module->cells())
+				if (cell->is_builtin_ff())
+					for (auto b : sigmap(cell->getPort(ID::Q)))
+						ff_q.insert(b);
+			dict<SigBit, Cell*> driver;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->output(conn.first))
+						for (auto b : sigmap(conn.second))
+							driver[b] = cell;
+			dict<SigBit, std::vector<std::pair<Cell*, IdString>>> readers;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections())
+					if (cell->input(conn.first))
+						for (auto b : sigmap(conn.second))
+							readers[b].push_back({cell, conn.first});
+			dict<SigSpec, SigSpec> inverted;
+			for (auto cell : module->cells())
+				if (cell->type == ID($not) || (cell->type == ID($logic_not) && GetSize(cell->getPort(ID::A)) == 1))
+					inverted[sigmap(cell->getPort(ID::Y))] = sigmap(cell->getPort(ID::A));
+			for (auto cell : module->selected_cells()) {
+				if (cell->type != ID($mux))
+					continue;
+				SigSpec a = sigmap(cell->getPort(ID::A)), b = sigmap(cell->getPort(ID::B));
+				bool flip = inverted.count(a) && inverted.at(a) == b;
+				if (flip)
+					std::swap(a, b);
+				else if (!inverted.count(b) || inverted.at(b) != a)
+					continue;
+				bool all_q = true;
+				for (auto bit : a)
+					if (!ff_q.count(bit)) all_q = false;
+				if (!all_q)
+					continue;
+				SigBit sel = sigmap(cell->getPort(ID::S).as_bit());
+				// a case on the register itself gives the same shape; not a toggle
+				bool reads_q = false;
+				pool<SigBit> qbits(a.begin(), a.end()), seen;
+				std::vector<SigBit> todo = {sel};
+				while (!todo.empty() && !reads_q && GetSize(seen) < 256) {
+					SigBit b = todo.back();
+					todo.pop_back();
+					if (!seen.insert(b).second)
+						continue;
+					if (qbits.count(b)) {
+						reads_q = true;
+						break;
+					}
+					if (!driver.count(b) || driver.at(b)->is_builtin_ff())
+						continue;
+					for (auto &conn : driver.at(b)->connections())
+						if (driver.at(b)->input(conn.first))
+							for (auto x : sigmap(conn.second))
+								if (x.wire) todo.push_back(x);
+				}
+				if (reads_q)
+					continue;
+				// only in the register's own next state: through multiplexers into its D
+				bool feeds_back = false;
+				pool<SigBit> fseen;
+				std::vector<SigBit> ftodo;
+				for (auto b : sigmap(cell->getPort(ID::Y)))
+					ftodo.push_back(b);
+				while (!ftodo.empty() && !feeds_back && GetSize(fseen) < 256) {
+					SigBit b = ftodo.back();
+					ftodo.pop_back();
+					if (!fseen.insert(b).second)
+						continue;
+					for (auto &r : readers[b]) {
+						Cell *rc = r.first;
+						if (rc->is_builtin_ff() && r.second == ID::D) {
+							for (auto x : sigmap(rc->getPort(ID::Q)))
+								if (qbits.count(x)) feeds_back = true;
+						} else if (rc->type.in(ID($mux), ID($pmux)) && r.second != ID::S)
+							for (auto x : sigmap(rc->getPort(ID::Y)))
+								ftodo.push_back(x);
+					}
+				}
+				if (!feeds_back)
+					continue;
+				if (flip)
+					sel = module->NotGate(NEW_ID, sel);
+				SigSpec y = cell->getPort(ID::Y);
+				module->remove(cell);
+				module->addXor(NEW_ID, a, SigSpec(sel, GetSize(a)), y);
+				log_debug("  %s toggles on %s\n", log_signal(a), log_signal(sel));
+				count++;
+			}
+			log("%s: %d toggles made XORs.\n", log_id(module), count);
+		}
+	}
+} Ice40LseTogglePass;
+
+struct Ice40LseCeCostPass : public Pass {
+	Ice40LseCeCostPass() : Pass("ice40_lsececost", "keep a flip-flop enable only where Lattice LSE does") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsececost [selection]\n");
+		log("\n");
+		log("For each $_DFFE_* without a synchronous reset, compares the LUTs needed with\n");
+		log("the enable (D, plus the enable logic if no other flip-flop shares it) and\n");
+		log("without it (E ? D : Q), estimated from the support of the logic only that\n");
+		log("flip-flop reads. LSE drops the enable when that is cheaper, or as cheap and D\n");
+		log("is an inverter.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSECECOST pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, Cell*> driver;
+			dict<SigBit, int> nreaders;
+			for (auto cell : module->cells())
+				for (auto &conn : cell->connections()) {
+					if (cell->output(conn.first))
+						for (auto b : sigmap(conn.second))
+							driver[b] = cell;
+					if (cell->input(conn.first))
+						for (auto b : sigmap(conn.second))
+							nreaders[b]++;
+				}
+			for (auto w : module->wires())
+				if (w->port_output || w->get_bool_attribute(ID::keep))
+					for (auto b : sigmap(SigSpec(w)))
+						nreaders[b] += 2;
+			auto gate = [&](Cell *c) {
+				return c && c->type.in(ID($_NOT_), ID($_AND_), ID($_OR_), ID($_XOR_), ID($_XNOR_), ID($_NAND_), ID($_NOR_),
+						ID($_ANDNOT_), ID($_ORNOT_), ID($_MUX_), ID($_NMUX_), ID($_AOI3_), ID($_OAI3_), ID($_AOI4_), ID($_OAI4_));
+			};
+			// the inputs of the logic behind sig that nothing else reads; empty: sig is a plain net
+			auto cone = [&](SigBit sig, pool<SigBit> &leaves) -> bool {
+				Cell *root = driver.count(sig) ? driver.at(sig) : nullptr;
+				if (!gate(root)) {
+					leaves.insert(sig);
+					return false;
+				}
+				std::vector<Cell*> todo = {root};
+				pool<Cell*> seen = {root};
+				while (!todo.empty()) {
+					Cell *c = todo.back();
+					todo.pop_back();
+					for (auto &conn : c->connections()) {
+						if (!c->input(conn.first))
+							continue;
+						for (auto b : sigmap(conn.second)) {
+							if (!b.wire)
+								continue;
+							Cell *d = driver.count(b) ? driver.at(b) : nullptr;
+							if (gate(d) && nreaders[b] == 1 && GetSize(seen) < 16) {
+								if (seen.insert(d).second)
+									todo.push_back(d);
+							} else
+								leaves.insert(b);
+						}
+					}
+				}
+				return true;
+			};
+			auto luts = [](bool logic, int support) {
+				if (!logic)
+					return 0;
+				return support <= 4 ? 1 : (support + 1) / 3;
+			};
+			dict<SigBit, std::vector<Cell*>> groups;
+			for (auto cell : module->selected_cells())
+				// with a synchronous reset LSE keeps the enable (CE over LSR)
+				if (cell->type.begins_with("$_DFFE_")) {
+					// dfflegalize gives each flip-flop of an active-low enable its own inverter
+					SigBit e = sigmap(cell->getPort(ID::E));
+					Cell *ec = driver.count(e) ? driver.at(e) : nullptr;
+					if (ec && ec->type == ID($_NOT_))
+						e = sigmap(ec->getPort(ID::A));
+					groups[e].push_back(cell);
+				}
+			RTLIL::Selection sel(false, false, design);
+			int dropped = 0;
+			for (auto &it : groups) {
+				pool<SigBit> e_leaves;
+				bool e_logic = cone(it.first, e_leaves);
+				// logic behind an enable several flip-flops share is there anyway
+				int e_cost = GetSize(it.second) == 1 ? luts(e_logic, GetSize(e_leaves)) : 0;
+				for (auto ff : it.second) {
+					SigBit d = sigmap(ff->getPort(ID::D)), q = sigmap(ff->getPort(ID::Q));
+					pool<SigBit> d_leaves;
+					bool d_logic = cone(d, d_leaves);
+					int with_ce = e_cost + luts(d_logic, GetSize(d_leaves));
+					pool<SigBit> all = d_leaves;
+					for (auto b : e_leaves)
+						all.insert(b);
+					all.insert(q);
+					int without = luts(true, GetSize(all));
+					Cell *dc = driver.count(d) ? driver.at(d) : nullptr;
+					bool inverter = dc && dc->type == ID($_NOT_);
+					if (without < with_ce || (without == with_ce && inverter)) {
+						log_debug("  %s: %d LUTs with the enable, %d without\n", log_signal(q), with_ce, without);
+						sel.select(module, ff);
+						dropped++;
+					}
+				}
+			}
+			if (dropped)
+				Pass::call_on_selection(design, sel, "dffunmap -ce-only");
+			log("%s: %d enables dropped.\n", log_id(module), dropped);
+		}
+	}
+} Ice40LseCeCostPass;
+
 PRIVATE_NAMESPACE_END

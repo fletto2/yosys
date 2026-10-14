@@ -122,7 +122,7 @@ struct SynthIce40Pass : public ScriptPass
 		json_file = "";
 		nocarry = false;
 		nodffe = false;
-		min_ce_use = 3;   // LSE leaves enables used by one or two flip-flops in the logic
+		min_ce_use = -1;  // ice40_lsececost decides, as LSE does
 		nobram = false;
 		spram = false;
 		dsp = true;
@@ -313,6 +313,8 @@ struct SynthIce40Pass : public ScriptPass
 			// (after fsm, which needs the original $pmux structure)
 			run("pmux2shiftx");
 			run("pmuxtree");
+			run("ice40_lsetoggle");
+			run("ice40_lseholdsel");
 			run("opt");
 			run("ice40_lseandsr");
 			run("ice40_lsetwoway");
@@ -399,6 +401,7 @@ struct SynthIce40Pass : public ScriptPass
 				run("dffunmap -srst-only t:$_SDFF_??1_ t:$sdff r:SRST_VALUE=1'1 %i %u");
 				run(stringf("dfflegalize -cell $_DFF_?_ 0 -cell $_DFFE_?P_ 0 -cell $_DFF_?P?_ 0 -cell $_DFFE_?P?P_ 0 -cell $_SDFF_?P?_ 0 -cell $_SDFFCE_?P?P_ 0 -cell $_DLATCH_?_ x -mince %d", min_ce_use));
 			}
+			run("ice40_lsececost");
 			run("techmap -map +/ice40/ff_map.v");
 			run("opt_expr -mux_undef");
 			run("simplemap");
