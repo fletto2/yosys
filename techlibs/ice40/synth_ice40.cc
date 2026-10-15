@@ -429,16 +429,14 @@ struct SynthIce40Pass : public ScriptPass
 				// LSE builds 4:1 multiplexers from two LUT4s
 				run("ice40_lsemuxchain", "                (unless -noabc)");
 				run("muxcover -mux4=300", "                (unless -noabc)");
-				run("ice40_lsereduce", "                 (unless -noabc)");
 				run("techmap -map +/ice40/lse_mux_map.v", "(unless -noabc)");
 				// a latch is a LUT feeding back on itself; after muxcover, which does not
 				// stop on such a loop
 				run("techmap -map +/ice40/latches_map.v", "(unless -noabc)");
-				// LSE duplicates small logic into its readers rather than sharing it, so
-				// no area recovery. A kept net (syn_keep) is a LUT output for LSE that
-				// the logic after it reads as is
-				run("ice40_lsecut -insert a:keep a:lse_cut %u", "(unless -noabc)");
-				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0", "(unless -noabc)");
+				// a kept net (syn_keep) stays a LUT output; mfs recovers area with don't
+				// cares as LSE does (5160 -> 5102 LCs on VERA, fmax up)
+				run("ice40_lsecut -insert a:keep", "(unless -noabc)");
+				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs,-W,4,-M,5000;mfs2", "(unless -noabc)");
 				run("ice40_lsecut -remove", "           (unless -noabc)");
 			}
 			run("ice40_wrapcarry -unwrap");
