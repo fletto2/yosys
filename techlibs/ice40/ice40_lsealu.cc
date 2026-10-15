@@ -1113,6 +1113,24 @@ struct Ice40LseCmpPass : public Pass {
 				bool eq = cell->type.in(ID($eq), ID($ne));
 				if (is_signed && !eq)
 					continue;
+				// x < {h, 2'b00} is x[hi] < h, and {h, 2'b00} <= x is h <= x[hi]: LSE drops
+				// the low bits (composer: x_counter >= {active_hstart, 2'b00})
+				if (!eq) {
+					int w0 = std::max(GetSize(cell->getPort(ID::A)), GetSize(cell->getPort(ID::B)));
+					SigSpec a0 = sigmap(cell->getPort(ID::A)), b0 = sigmap(cell->getPort(ID::B));
+					a0.extend_u0(w0); b0.extend_u0(w0);
+					bool zeros_in_a = cell->type.in(ID($gt), ID($le));
+					SigSpec z = zeros_in_a ? a0 : b0;
+					int k = 0;
+					while (k < w0 - 1 && z[k] == State::S0)
+						k++;
+					if (k > 0) {
+						cell->setPort(ID::A, a0.extract(k, w0 - k));
+						cell->setPort(ID::B, b0.extract(k, w0 - k));
+						cell->setParam(ID::A_WIDTH, w0 - k);
+						cell->setParam(ID::B_WIDTH, w0 - k);
+					}
+				}
 				int w = std::max(GetSize(cell->getPort(ID::A)), GetSize(cell->getPort(ID::B)));
 				SigSpec a = sigmap(cell->getPort(ID::A)), b = sigmap(cell->getPort(ID::B));
 				// zero-extension of one operand is fine (handled below); other constant bits
