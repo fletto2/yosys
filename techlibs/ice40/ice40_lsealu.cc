@@ -2896,4 +2896,94 @@ struct Ice40LseWrapPass : public Pass {
 	}
 } Ice40LseWrapPass;
 
+struct Ice40LseChainPass : public Pass {
+	Ice40LseChainPass() : Pass("ice40_lsechain", "give carry chains the shape of Lattice LSE's FA2 chains") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsechain [selection]\n");
+		log("\n");
+		log("LSE builds carry chains out of FA2 cells, two logic cells each, and Radiant\n");
+		log("enables the carry of every half. So the top bit of a chain has a carry even\n");
+		log("when nothing reads it, and a chain with an odd number of halves ends in a spare\n");
+		log("half whose LUT passes the carry through. Works on SB_CARRY and SB_LUT4 cells.\n");
+		log("\n");
+	}
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		extra_args(args, 1, design);
+		log_header(design, "Executing ICE40_LSECHAIN pass.\n");
+		for (auto module : design->selected_modules()) {
+			SigMap sigmap(module);
+			dict<SigBit, Cell*> carry_by_ci;
+			dict<SigBit, std::vector<Cell*>> lut_by_i3;
+			std::vector<Cell*> carries;
+			for (auto cell : module->cells()) {
+				if (cell->type == ID(SB_CARRY)) {
+					carries.push_back(cell);
+					carry_by_ci[sigmap(cell->getPort(ID::CI)).as_bit()] = cell;
+				} else if (cell->type == ID(SB_LUT4))
+					lut_by_i3[sigmap(cell->getPort(ID(I3))).as_bit()].push_back(cell);
+			}
+			pool<Cell*> has_prev;
+			for (auto c : carries) {
+				SigBit co = sigmap(c->getPort(ID::CO)).as_bit();
+				if (carry_by_ci.count(co))
+					has_prev.insert(carry_by_ci.at(co));
+			}
+			int tops = 0, pads = 0;
+			for (auto start : carries) {
+				if (has_prev.count(start))
+					continue;
+				int n = 1;
+				Cell *top = start;
+				for (;;) {
+					SigBit co = sigmap(top->getPort(ID::CO)).as_bit();
+					if (!carry_by_ci.count(co))
+						break;
+					top = carry_by_ci.at(co);
+					n++;
+				}
+				SigBit co = sigmap(top->getPort(ID::CO)).as_bit();
+				if (co.wire == nullptr)
+					continue;
+				// the sum LUT of the top bit gets its carry back
+				auto it = lut_by_i3.find(co);
+				if (it != lut_by_i3.end() && GetSize(it->second) == 1) {
+					Cell *lut = it->second.front();
+					Cell *k = module->addCell(NEW_ID, ID(SB_CARRY));
+					k->setPort(ID(I0), lut->getPort(ID(I1)));
+					k->setPort(ID(I1), lut->getPort(ID(I2)));
+					k->setPort(ID::CI, co);
+					k->setPort(ID::CO, module->addWire(NEW_ID));
+					k->set_bool_attribute(ID::keep);
+					top = k;
+					co = k->getPort(ID::CO).as_bit();
+					n++;
+					tops++;
+				}
+				if (n % 2 == 0)
+					continue;
+				Cell *k = module->addCell(NEW_ID, ID(SB_CARRY));
+				k->setPort(ID(I0), State::S0);
+				k->setPort(ID(I1), State::S0);
+				k->setPort(ID::CI, co);
+				k->setPort(ID::CO, module->addWire(NEW_ID));
+				k->set_bool_attribute(ID::keep);
+				Cell *l = module->addCell(NEW_ID, ID(SB_LUT4));
+				l->setPort(ID(I0), State::S0);
+				l->setPort(ID(I1), State::S0);
+				l->setPort(ID(I2), State::S0);
+				l->setPort(ID(I3), co);
+				l->setPort(ID::O, module->addWire(NEW_ID));
+				l->setParam(ID(LUT_INIT), Const(0xc33c, 16));
+				l->set_bool_attribute(ID::keep);
+				pads++;
+			}
+			log("%s: %d top carries restored, %d chains padded.\n", log_id(module), tops, pads);
+		}
+	}
+} Ice40LseChainPass;
+
 PRIVATE_NAMESPACE_END

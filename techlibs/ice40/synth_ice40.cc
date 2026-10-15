@@ -459,6 +459,7 @@ struct SynthIce40Pass : public ScriptPass
 		if (check_label("polarity")) {
 			run("ice40_lsemuxsel");
 			run("ice40_lsepolarity");
+			run("ice40_lsechain");
 		}
 
 		if (check_label("map_iopads"))

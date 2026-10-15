@@ -49,12 +49,15 @@ module _80_ice40_alu (A, B, CI, BI, X, Y, CO);
 	wire [Y_WIDTH-1:0] BB = BI ? ~B_buf : B_buf;
 	wire CI0;
 `ifdef LSE
-	// LSE starts every chain with an extra carry half cell, so a constant carry-in
-	// still reaches the low sum LUT as a carry net
+	// LSE starts a chain with carry-in 0 with an extra half cell whose own carry-in is
+	// left open (1 in Radiant's model), so the low sum LUT still reads a carry net. A
+	// chain with carry-in 1 has no extra half: the low bit takes the open carry-in.
 	parameter _TECHMAP_CONSTMSK_CI_ = 0;
 	parameter _TECHMAP_CONSTVAL_CI_ = 0;
-	generate if (_TECHMAP_CONSTMSK_CI_)
-		(* keep *) SB_CARRY carry_in (.I0(_TECHMAP_CONSTVAL_CI_ == 1'b1), .I1(_TECHMAP_CONSTVAL_CI_ == 1'b1), .CI(1'b0), .CO(CI0));
+	generate if (_TECHMAP_CONSTMSK_CI_ && _TECHMAP_CONSTVAL_CI_ == 1'b1)
+		assign CI0 = 1'b1;
+	else if (_TECHMAP_CONSTMSK_CI_)
+		(* keep *) SB_CARRY carry_in (.I0(1'b0), .I1(1'b0), .CI(1'b1), .CO(CI0));
 	else
 		assign CI0 = CI;
 	endgenerate
