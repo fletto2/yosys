@@ -34,6 +34,15 @@ struct SynthXilinxPass : public ScriptPass
 	{
 		RTLIL::constpad["synth_xilinx.abc9.xc7.W"] = "300"; // Number with which ABC will map a 6-input gate
 								    // to one LUT6 (instead of a LUT5 + LUT2)
+		target_register.emplace("xilinx", Target{
+			"Xilinx",
+			{
+				{"", { // default
+					"",
+					{"+/xilinx/cells_sim.v", "+/xilinx/cells_xtra.v"}
+				}}
+			}
+		});
 	}
 
 	void help() override
@@ -354,8 +363,8 @@ struct SynthXilinxPass : public ScriptPass
 				log_error("Tristate buffers are unsupported without the '-iopad' option.\n");
 			run("deminout");
 			run("opt_expr");
-			run("opt_clean");
 			run("check");
+			run("opt_clean");
 			run("opt -nodffe -nosdff");
 			run("fsm");
 			run("opt");
@@ -383,6 +392,10 @@ struct SynthXilinxPass : public ScriptPass
 		if (check_label("map_dsp", "(skip if '-nodsp')")) {
 			if (!nodsp || help_mode) {
 				run("memory_dff"); // xilinx_dsp will merge registers, reserve memory port registers first
+				// give every product its own adder for the DSP post-adder
+				run("alumacc -macc-only");
+				run("maccmap -unmap");
+				run("opt_clean");
 				// NB: Xilinx multipliers are signed only
 				if (help_mode)
 					run("techmap -map +/mul2dsp.v -map +/xilinx/{family}_dsp_map.v {options}");
@@ -514,7 +527,8 @@ struct SynthXilinxPass : public ScriptPass
 					params += " -lib +/xilinx/brams_xc4v.txt";
 					params += " -D HAS_SIZE_36";
 					params += " -D HAS_CASCADE";
-					params += " -D HAS_CONFLICT_BUG";
+					if (family == "xc6v")
+						params += " -D HAS_CONFLICT_BUG";
 					params += " -D HAS_MIXWIDTH_SDP";
 					brams_map = "+/xilinx/brams_xc6v_map.v";
 				} else if (family == "xcu" || family == "xcup") {

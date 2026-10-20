@@ -68,6 +68,9 @@ namespace py = pybind11;
 #  include <unistd.h>
 #endif
 
+#include <fmt/color.h>
+#include <fmt/format.h>
+
 USING_YOSYS_NAMESPACE
 
 #if defined(YOSYS_ENABLE_READLINE) || defined(YOSYS_ENABLE_EDITLINE)
@@ -115,6 +118,103 @@ namespace Yosys {
 namespace Yosys {
 	extern bool log_stderr_sink_forced;
 };
+
+class ColorConsoleLogSink : public LogSink
+{
+public:
+	explicit ColorConsoleLogSink(bool err, bool quiet) : error_output(err), quiet_warnings(quiet) {}
+	void log(const LogMessage &msg) override;
+	bool should_log(const LogMessage &msg) const override;
+	void flush() override;
+	FILE *file_handle() override { return error_output ? nullptr : stdout; }
+private:
+	bool error_output;
+	bool quiet_warnings;
+};
+
+bool no_color = false;
+
+bool is_colored(FILE *file)
+{
+	if (no_color)
+		return false;
+
+#if defined(_WIN32)
+	HANDLE handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(file)));
+	DWORD mode;
+	return handle != INVALID_HANDLE_VALUE &&
+			GetConsoleMode(handle, &mode);
+#else
+	return isatty(fileno(file));
+#endif
+}
+
+void ColorConsoleLogSink::flush()
+{
+	fflush(stdout);
+	fflush(stderr);
+}
+
+bool next_print_log = true;
+
+void ColorConsoleLogSink::log(const LogMessage &msg)
+{
+	FILE *f = (error_output || msg.severity == LogSeverity::Error) ? stderr : stdout;
+
+	if (logger().get_log_time() && next_print_log) {
+		auto elapsed = msg.timestamp - logger().get_initial_time();
+		auto us = std::chrono::duration_cast<std::chrono::microseconds>(elapsed);
+		std::string time_str = stringf("[%05d.%06d] ", int(us.count() / 1'000'000),int(us.count() % 1'000'000));
+		fmt::print(f, fg(fmt::terminal_color::blue), "{}", time_str);
+		next_print_log = false;
+	}
+
+	if (!msg.src.filename.empty())
+		fmt::print(f, fg(fmt::terminal_color::bright_cyan), "{}:{}: ", msg.src.filename, msg.src.start_line);
+
+	switch (msg.severity) {
+		case LogSeverity::Warning:
+			fmt::print(f, fg(fmt::terminal_color::bright_yellow), "{}", msg.prefix);
+			fmt::print(f, fg(fmt::terminal_color::blue) | fmt::emphasis::bold, "{}", msg.message);
+			break;
+
+		case LogSeverity::Error:
+		case LogSeverity::NonFatalError:
+			fmt::print(f, fg(fmt::terminal_color::bright_red), "{}", msg.prefix);
+			fmt::print(f, fg(fmt::terminal_color::blue) | fmt::emphasis::bold, "{}", msg.message);
+			break;
+
+		case LogSeverity::Header:
+			fmt::print(f, fg(fmt::terminal_color::cyan) | fmt::emphasis::bold, "{}", msg.prefix);
+			fmt::print(f, fg(fmt::terminal_color::white) | fmt::emphasis::bold, "{}", msg.message);
+			break;
+
+		case LogSeverity::Highlight:
+			fmt::print(f, fg(fmt::terminal_color::cyan) | fmt::emphasis::bold, "{}{}", msg.prefix, msg.message);
+			break;
+
+		case LogSeverity::Comment:
+		case LogSeverity::Debug:
+			fmt::print(f, fg(fmt::terminal_color::bright_black), "{}{}", msg.prefix, msg.message);
+			break;
+
+		case LogSeverity::Info:
+		default:
+			if (!msg.prefix.empty())
+				fmt::print(f, fg(fmt::terminal_color::bright_black), "{}", msg.prefix);
+			fmt::print(f, "{}", msg.message);
+			break;
+	}
+	if (!msg.message.empty())
+		next_print_log = msg.message.back() == '\n';
+}
+
+bool ColorConsoleLogSink::should_log(const LogMessage &msg) const
+{
+	return (!error_output) || (msg.severity == LogSeverity::Error || msg.severity == LogSeverity::NonFatalError ||
+			(msg.severity == LogSeverity::Warning && !quiet_warnings) ||
+			log_stderr_sink_forced);
+}
 
 #ifdef _WIN32
 int wmain(int argc, wchar_t **wargv)
@@ -166,6 +266,7 @@ int main(int argc, char **argv)
 	bool mode_q = false;
 	bool quiet_warnings = false;
 	bool log_stderr = false;
+	no_color = std::getenv("NO_COLOR") != nullptr;
 
 	cxxopts::Options options(argv[0], "Yosys Open SYnthesis Suite");
 	options.set_width(SIZE_MAX);
@@ -236,14 +337,13 @@ int main(int argc, char **argv)
 			cxxopts::value<std::vector<std::string>>(), "<regex>")
 		("E,deps-file", "write a Makefile dependencies file <depsfile> with input and output file names",
 			cxxopts::value<std::string>(), "<depsfile>")
+		("no-color", "disable colored output");
 	;
 	options.add_options("developer")
 		("X,trace", "enable tracing of core data structure changes. for debugging")
 		("M,randomize-pointers", "will slightly randomize allocated pointer addresses. for debugging")
-		("autoidx", "start counting autoidx up from <seed>, similar effect to --hash-seed",
+		("autoidx", "start counting autoidx up from <seed>",
 			cxxopts::value<uint64_t>(), "<idx>")
-		("hash-seed", "mix up hashing values with <seed>, for extreme optimization and testing",
-			cxxopts::value<uint64_t>(), "<seed>")
 		("A,abort", "will call abort() at the end of the script. for debugging")
 		("x,experimental", "do not print warnings for the experimental <feature>",
 			cxxopts::value<std::vector<std::string>>(), "<feature>")
@@ -339,6 +439,7 @@ int main(int argc, char **argv)
 			logger().set_verbose_level(result["v"].as<int>());
 		}
 		if (result.count("t")) logger().set_log_time(true);
+		if (result.count("no-color")) no_color = true;
 		if (result.count("d")) timing_details = true;
 		for (const auto& key : {"s", "c"}) {
 			if (result.count(key)) {
@@ -403,16 +504,15 @@ int main(int argc, char **argv)
 			int idx = result["autoidx"].as<uint64_t>();
 			autoidx = idx;
 		}
-		if (result.count("hash-seed")) {
-			int seed = result["hash-seed"].as<uint64_t>();
-			Hasher::set_fudge((Hasher::hash_t)seed);
-		}
 
-		if (!log_stderr) {
-			logger().add_sink<ConsoleLogSink>();
-		} else {
-			logger().add_sink<StderrLogSink>(quiet_warnings);
-		}
+		if (!is_colored(stdout) || !is_colored(stderr)) {
+			if (!log_stderr) {
+				logger().add_sink<ConsoleLogSink>();
+			} else {
+				logger().add_sink<StderrLogSink>(quiet_warnings);
+			}
+		} else
+			logger().add_sink<ColorConsoleLogSink>(log_stderr, quiet_warnings);
 
 		if (print_banner)
 			yosys_banner();
@@ -549,7 +649,7 @@ int main(int argc, char **argv)
 			if (PyRun_SimpleFile(scriptfp, scriptfile.c_str()) != 0) {
 				log_flush();
 				PyErr_Print();
-				log_error("Python interpreter encountered an exception.");
+				log_error("Python interpreter encountered an exception.\n");
 			}
 #else
 			log_error("Can't execute Python script: this version of yosys is not built with Python support enabled.\n");
@@ -617,8 +717,11 @@ int main(int argc, char **argv)
 
 		if (GetSize(logger().get_deprecated()) != 0) {
 			log("Deprecated features used:\n");
-			for(auto &feature : logger().get_deprecated())
-				log("    %s\n", feature);
+			for (auto &[feature, earliest_removal] : logger().get_deprecated())
+				if (earliest_removal.empty())
+					log("    %s\n", feature);
+				else
+					log("    %s (may be removed as soon as Yosys %s)\n", feature, earliest_removal);
 		}
 #ifdef _WIN32
 		log("End of script. Logfile hash: %s\n", hash);
@@ -666,11 +769,9 @@ int main(int argc, char **argv)
 				total_ns += pass_ns;
 				timedat.insert(make_tuple(pass_ns, it.second->call_counter, it.first));
 			}
-		{
-			auto gc_ns = RTLIL::OwningIdString::garbage_collection_ns() + 1;
-			total_ns += gc_ns;
-			timedat.insert(make_tuple(gc_ns,
-					RTLIL::OwningIdString::garbage_collection_count(), "id_gc"));
+		if (twine_gc_count) {
+			total_ns += twine_gc_ns;
+			timedat.insert(make_tuple(twine_gc_ns, twine_gc_count, "twine_gc"));
 		}
 
 		if (timing_details)
@@ -684,16 +785,17 @@ int main(int argc, char **argv)
 		else
 		{
 			int out_count = 0;
-			log("Time spent:");
+			std::string message = "Time spent:";
 			for (auto it = timedat.rbegin(); it != timedat.rend() && out_count < 4; it++, out_count++) {
 				if (out_count >= 2 && (std::get<0>(*it) < 1000000000 || int(100*std::get<0>(*it) / total_ns) < 20)) {
-					log(", ...");
+					message += ", ...";
 					break;
 				}
-				log("%s %d%% %dx %s (%d sec)", out_count ? "," : "", int(100*std::get<0>(*it) / total_ns),
+				message += stringf("%s %d%% %dx %s (%d sec)", out_count ? "," : "", int(100*std::get<0>(*it) / total_ns),
 						std::get<1>(*it), std::get<2>(*it).c_str(), int(std::get<0>(*it) / 1000000000));
 			}
-			log("%s\n", out_count ? "" : " no commands executed");
+			message += out_count ? "" : " no commands executed";
+			log("%s\n", message);
 		}
 		if(!perffile.empty())
 		{
@@ -729,13 +831,13 @@ int main(int argc, char **argv)
 		abort();
 
 	log_flush();
+
+	yosys_shutdown();
+
 #if defined(_MSC_VER)
 	_exit(0);
 #elif defined(_WIN32)
 	_Exit(0);
 #endif
-
-	yosys_shutdown();
-
 	return 0;
 }

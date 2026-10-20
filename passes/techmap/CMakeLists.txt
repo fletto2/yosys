@@ -1,3 +1,5 @@
+add_subdirectory(mcm)
+
 yosys_core(libparse
 	libparse.cc
 	libparse.h
@@ -102,7 +104,6 @@ yosys_pass(abc_new
 		abc9_exe
 		abc9_ops
 		box_derive
-		read_xaiger2
 		write_xaiger2
 )
 

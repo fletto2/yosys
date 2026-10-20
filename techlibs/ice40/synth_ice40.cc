@@ -21,6 +21,7 @@
 #include "kernel/celltypes.h"
 #include "kernel/rtlil.h"
 #include "kernel/log.h"
+#include "passes/proc/proc_dlatch.h"
 
 USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
@@ -28,6 +29,22 @@ PRIVATE_NAMESPACE_BEGIN
 struct SynthIce40Pass : public ScriptPass
 {
 	SynthIce40Pass() : ScriptPass("synth_ice40", "synthesis for iCE40 FPGAs") { }
+
+	void on_register() override
+	{
+		RTLIL::constpad["synth_ice40.abc9.hx.W"] = "250";
+		RTLIL::constpad["synth_ice40.abc9.lp.W"] = "400";
+		RTLIL::constpad["synth_ice40.abc9.u.W"] = "750";
+		target_register.emplace("ice40", Target{
+			"Lattice iCE40",
+			{
+				{"", { // default
+					"",
+					{"+/ice40/cells_sim.v"}
+				}}
+			}
+		});
+	}
 
 	void help() override
 	{
@@ -97,12 +114,17 @@ struct SynthIce40Pass : public ScriptPass
 		log("        (this feature is experimental and incomplete)\n");
 		log("\n");
 
-		log("    -latches <info|warn|error>\n");
-		log("        select the behaviour for latches that cannot be mapped to a\n");
-		log("        dedicated hardware primitive and are implemented using LUTs\n");
-		log("        instead (a LUT feeding back on itself, as LSE builds them). 'error'\n");
-		log("        aborts synthesis, 'warn' (the default) only prints a warning, and\n");
-		log("        'info' permits them with an info-level message.\n");
+		SynthLatchesConfig::help();
+		log("        When given, this overrides -lse-latches.\n");
+		log("\n");
+		log("    -lse-latches <info|warn|error>\n");
+		log("        as -latches, for the LSE-style flow: latches that cannot be mapped\n");
+		log("        to a dedicated primitive become a LUT feeding back on itself, as\n");
+		log("        LSE builds them. 'warn' is the default here.\n");
+		log("\n");
+		log("    -no-rw-check\n");
+		log("        accepted for compatibility; always on (LSE builds no read/write\n");
+		log("        collision bypass logic).\n");
 		log("\n");
 		log("\n");
 		log("The following commands are executed by this synthesis command:\n");
@@ -110,8 +132,11 @@ struct SynthIce40Pass : public ScriptPass
 		log("\n");
 	}
 
-	string top_opt, blif_file, edif_file, json_file, device_opt, latches;
-	bool nocarry, nodffe, nobram, spram, dsp, flatten, noabc, vpr;
+	string top_opt, blif_file, edif_file, json_file, device_opt;
+	SynthLatchesConfig latches;
+	LatchPolicy lse_latches;
+	bool latches_given;
+	bool nocarry, nodffe, nobram, spram, dsp, flatten, noabc, vpr, dff, no_rw_check;
 	int min_ce_use;
 
 	void clear_flags() override
@@ -130,7 +155,16 @@ struct SynthIce40Pass : public ScriptPass
 		noabc = false;
 		vpr = false;
 		device_opt = "hx";
-		latches = "warn";
+		no_rw_check = false;
+		latches = SynthLatchesConfig();
+		lse_latches = LatchPolicy::Warn;
+		latches_given = false;
+	}
+
+	// -latches when given, else -lse-latches
+	LatchPolicy latch_policy() const
+	{
+		return latches_given ? latches.policy : lse_latches;
 	}
 
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
@@ -233,8 +267,13 @@ struct SynthIce40Pass : public ScriptPass
 				// always on: LSE builds no read-during-write bypass logic
 				continue;
 			}
-			if (args[argidx] == "-latches" && argidx+1 < args.size()) {
-				latches = args[++argidx];
+			if (latches.parse(args, argidx)) {
+				latches_given = true;
+				continue;
+			}
+			if (args[argidx] == "-lse-latches" && argidx+1 < args.size()) {
+				if (!latch_policy_from_string(args[++argidx], lse_latches))
+					log_cmd_error("Invalid value '%s' for -lse-latches (expected info|warn|error).\n", args[argidx].c_str());
 				continue;
 			}
 			break;
@@ -245,8 +284,6 @@ struct SynthIce40Pass : public ScriptPass
 			log_cmd_error("This command only operates on fully selected designs!\n");
 		if (device_opt != "hx" && device_opt != "lp" && device_opt !="u")
 			log_cmd_error("Invalid or no device specified: '%s'\n", device_opt);
-		if (latches != "info" && latches != "warn" && latches != "error")
-			log_cmd_error("Invalid value '%s' for -latches (expected info, warn or error)\n", latches.c_str());
 
 		log_header(design, "Executing SYNTH_ICE40 pass.\n");
 		log_push();
@@ -275,7 +312,7 @@ struct SynthIce40Pass : public ScriptPass
 			run("read_verilog -lib -nooverwrite +/ice40/radiant_cells.v");
 			run(stringf("hierarchy -check %s", help_mode ? "-top <top>" : top_opt));
 			run("ice40_radiant");
-			run("proc -latches " + (latches == "info" ? std::string("info") : std::string("warn")));
+			run(stringf("proc -latches %s", latch_policy() == LatchPolicy::Info ? "info" : "warn"));
 			// before opt_merge shares a compared multiplexer with an identical one
 			run("ice40_lsemuxcmp");
 			// identical drivers of one net (e.g. a duplicated assign) are one driver, as for LSE
@@ -306,8 +343,8 @@ struct SynthIce40Pass : public ScriptPass
 			run("ice40_lseaddenable");
 			run("ice40_lseaddload");
 			run("opt_expr");
-			run("opt_clean");
 			run("check");
+			run("opt_clean");
 			run("opt -nodffe -nosdff");
 			run("fsm -lse");
 			// LSE builds case statements as binary mux trees on the select bits
@@ -334,6 +371,10 @@ struct SynthIce40Pass : public ScriptPass
 			run("ice40_lsememlogic");
 			run("memory_dff -lse" + no_rw_check_opt);
 			if (help_mode || dsp) {
+				// give every product its own adder for the DSP post-adder
+				run("alumacc -macc-only", "            (if -dsp)");
+				run("maccmap -unmap", "                (if -dsp)");
+				run("opt_clean", "                     (if -dsp)");
 				run("wreduce t:$mul");
 				run("techmap -map +/mul2dsp.v -map +/ice40/dsp_map.v -D DSP_A_MAXWIDTH=16 -D DSP_B_MAXWIDTH=16 "
 						"-D DSP_A_MINWIDTH=2 -D DSP_B_MINWIDTH=2 -D DSP_Y_MINWIDTH=11 "
@@ -416,8 +457,8 @@ struct SynthIce40Pass : public ScriptPass
 
 		if (check_label("map_luts"))
 		{
-			if (latches == "error" || help_mode)
-				run("check -latchonly -assert", "(only if -latches error)");
+			if (latch_policy() == LatchPolicy::Error || help_mode)
+				run("check -latchonly -assert", "(only if -latches or -lse-latches error)");
 			if (noabc || help_mode)
 				run("techmap -map +/ice40/latches_map.v", "(if -noabc)");
 			if (noabc || help_mode) {

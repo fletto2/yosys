@@ -453,10 +453,10 @@ struct PerformReduction
 				out_depth[idx] = std::numeric_limits<int>::max();
 
 			if (verbose_level >= 1) {
-				log("%s    Found %d equivalent signals:", indt, int(bucket.size()));
+				std::string message = stringf("%s    Found %d equivalent signals:", indt, int(bucket.size()));
 				for (int idx : bucket)
-					log("%s%s%s", idx == bucket.front() ? " " : ", ", out_inverted[idx] ? "~" : "", log_signal(out_bits[idx]));
-				log("\n");
+					message += stringf("%s%s%s", idx == bucket.front() ? " " : ", ", out_inverted[idx] ? "~" : "", log_signal(out_bits[idx]));
+				log("%s\n", message);
 			}
 
 			int result_idx = -1;
@@ -597,7 +597,7 @@ struct FreduceWorker
 	{
 		std::string filename = stringf("%s_%s_%05d.il", dump_prefix, module, reduce_counter);
 		log("%s    Writing dump file `%s'.\n", reduce_counter ? "  " : "", filename);
-		Pass::call(design, stringf("dump -outfile %s %s", filename, design->selected_active_module.empty() ? module->name.c_str() : ""));
+		Pass::call(design, stringf("dump -outfile %s %s", filename, design->selected_active_module.empty() ? module->name.str().c_str() : ""));
 	}
 
 	int run()
@@ -607,6 +607,7 @@ struct FreduceWorker
 		CellTypes ct;
 		ct.setup_internals();
 		ct.setup_stdcells();
+		ct.cell_types.erase(ID($barrier));
 
 		int bits_full_total = 0;
 		std::vector<std::set<RTLIL::SigBit>> batches;

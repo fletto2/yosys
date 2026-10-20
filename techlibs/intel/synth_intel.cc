@@ -29,6 +29,31 @@ PRIVATE_NAMESPACE_BEGIN
 struct SynthIntelPass : public ScriptPass {
 	SynthIntelPass() : ScriptPass("synth_intel", "synthesis for Intel (Altera) FPGAs.") { experimental(); }
 
+	void on_register() override
+	{
+		target_register.emplace("intel", Target{
+			"Intel (Altera)",
+			{
+				{"max10", {
+					"MAX 10",
+					{"+/intel/max10/cells_sim.v", "+/intel/common/m9k_bb.v", "+/intel/common/altpll_bb.v"}
+				}},
+				{"cycloneiv", {
+					"Cyclone IV",
+					{"+/intel/cycloneiv/cells_sim.v", "+/intel/common/m9k_bb.v", "+/intel/common/altpll_bb.v"}
+				}},
+				{"cycloneive", {
+					"Cyclone IVe",
+					{"+/intel/cycloneive/cells_sim.v", "+/intel/common/m9k_bb.v", "+/intel/common/altpll_bb.v"}
+				}},
+				{"cyclone10lp", {
+					"Cyclone 10LP",
+					{"+/intel/cyclone10lp/cells_sim.v", "+/intel/common/m9k_bb.v", "+/intel/common/altpll_bb.v"}
+				}}
+			}
+		});
+	}
+
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
@@ -204,8 +229,8 @@ struct SynthIntelPass : public ScriptPass {
 			run("tribuf -logic");
 			run("deminout");
 			run("opt_expr");
-			run("opt_clean");
 			run("check");
+			run("opt_clean");
 			run("opt -nodffe -nosdff");
 			run("fsm");
 			run("opt");
@@ -272,7 +297,7 @@ struct SynthIntelPass : public ScriptPass {
 
 		if (check_label("map_cells")) {
 			if (iopads || help_mode)
-				run("iopadmap -bits -outpad $__outpad I:O -inpad $__inpad O:I", "(if -iopads)");
+				run("iopadmap -bits -outpad $__outpad I:O -inpad $__inpad O:I A:top", "(if -iopads)");
 			run(stringf("techmap -map +/intel/%s/cells_map.v", family_opt));
 			run("clean -purge");
 		}

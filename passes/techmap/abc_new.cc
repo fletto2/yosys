@@ -27,7 +27,7 @@ PRIVATE_NAMESPACE_BEGIN
 std::vector<Module*> order_modules(Design *design, std::vector<Module *> modules)
 {
 	std::set<Module *> modules_set(modules.begin(), modules.end());
-	using Order = IdString::compare_ptr_by_name<RTLIL::NamedObject>;
+	using Order = IdString::compare_ptr_by_name<RTLIL::Module>;
 	TopoSort<Module*, Order> sort;
 
 	for (auto m : modules) {
@@ -99,6 +99,7 @@ struct AbcNewPass : public ScriptPass {
 	{
 		std::string run_from, run_to;
 		cleanup = true;
+		abc_exe_options.clear();
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
 			if (args[argidx] == "-exe" || args[argidx] == "-script" ||
@@ -169,6 +170,7 @@ struct AbcNewPass : public ScriptPass {
 			}
 
 			for (auto mod : selected_modules) {
+				GarbageCollectionGuard gc_guard(false);
 				std::string tmpdir = "<abc-temp-dir>";
 				std::string modname = "<module>";
 				std::string exe_options = "[options]";
@@ -193,8 +195,9 @@ struct AbcNewPass : public ScriptPass {
 				run(stringf("  abc9_ops -write_box %s/input.box", tmpdir));
 				run(stringf("  write_xaiger2 -mapping_prep -map2 %s/input.map2 %s/input.xaig", tmpdir, tmpdir));
 				run(stringf("  abc9_exe %s -cwd %s -box %s/input.box", exe_options, tmpdir, tmpdir));
-				run(stringf("  read_xaiger2 -sc_mapping -module_name %s -map2 %s/input.map2 %s/output.aig",
-							modname.c_str(), tmpdir.c_str(), tmpdir.c_str()));
+				run(stringf("  read_aiger -xaiger -module_name %s$abc9 %s/output.aig",
+							modname, tmpdir));
+				run(stringf("  abc_ops_reintegrate -stdcell -map %s/input.map2", tmpdir));
 				if (!help_mode && mod->has_attribute(ID(abc9_script))) {
 					if (script_save.empty())
 						active_design->scratchpad_unset("abc9.script");

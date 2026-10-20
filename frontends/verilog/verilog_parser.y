@@ -69,10 +69,10 @@
 		struct ParseState {
 			int port_counter;
 			dict<std::string, int> port_stubs;
-			std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> attr_list;
-			dict<IdString, std::unique_ptr<AstNode>> default_attr_list;
-			std::stack<std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>>> attr_list_stack;
-			std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> albuf;
+			std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> attr_list;
+			dict<std::string, std::unique_ptr<AstNode>> default_attr_list;
+			std::stack<std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>>> attr_list_stack;
+			std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> albuf;
 			std::vector<UserTypeMap> user_type_stack;
 			dict<std::string, AstNode*> pkg_user_types;
 			std::vector<AstNode*> ast_stack;
@@ -108,15 +108,15 @@
 			bool isInLocalScope(const std::string *name);
 			void rewriteGenForDeclInit(AstNode *loop);
 			void ensureAsgnExprAllowed(const parser::location_type loc, bool sv_mode);
-			const AstNode *addIncOrDecStmt(std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> stmt_attr,
+			const AstNode *addIncOrDecStmt(std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> stmt_attr,
 									std::unique_ptr<AstNode> lhs,
-									std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> op_attr, AST::AstNodeType op,
+									std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> op_attr, AST::AstNodeType op,
 									parser::location_type loc);
 			std::unique_ptr<AstNode> addIncOrDecExpr(std::unique_ptr<AstNode> lhs,
-								 std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> attr,
+								 std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> attr,
 								 AST::AstNodeType op, parser::location_type loc, bool undo, bool sv_mode);
 			// add a binary operator assignment statement, e.g., a += b
-			std::unique_ptr<AstNode> addAsgnBinopStmt(std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> attr,
+			std::unique_ptr<AstNode> addAsgnBinopStmt(std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> attr,
 								  std::unique_ptr<AstNode> eq_lhs, AST::AstNodeType op, std::unique_ptr<AstNode> rhs);
 		};
 		struct ParseMode {
@@ -166,17 +166,17 @@
 			return Location(begin.begin, end.end);
 		}
 
-		static void append_attr(AstNode *ast, std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> al)
+		static void append_attr(AstNode *ast, std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> al)
 		{
 			for (auto &it : *al) {
-				ast->attributes[it.first] = std::move(it.second);
+				ast->attributes[AST::intern_attr_name(it.first)] = std::move(it.second);
 			}
 		}
 
-		static void append_attr_clone(AstNode *ast, std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> &al)
+		static void append_attr_clone(AstNode *ast, std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> &al)
 		{
 			for (auto &it : *al) {
-				ast->attributes[it.first] = it.second->clone();
+				ast->attributes[AST::intern_attr_name(it.first)] = it.second->clone();
 			}
 		}
 
@@ -373,9 +373,9 @@
 		}
 
 		// add a pre/post-increment/decrement statement
-		const AstNode *ParseState::addIncOrDecStmt(std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> stmt_attr,
+		const AstNode *ParseState::addIncOrDecStmt(std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> stmt_attr,
 							std::unique_ptr<AstNode> lhs,
-							std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> op_attr, AST::AstNodeType op,
+							std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> op_attr, AST::AstNodeType op,
 							Location loc)
 		{
 			auto one = AstNode::mkconst_int(loc, 1, true);
@@ -392,7 +392,7 @@
 
 		// create a pre/post-increment/decrement expression, and add the corresponding statement
 		std::unique_ptr<AstNode> ParseState::addIncOrDecExpr(std::unique_ptr<AstNode> lhs,
-								     std::unique_ptr<dict<IdString,
+								     std::unique_ptr<dict<std::string,
 								     std::unique_ptr<AstNode>>> attr,
 								     AST::AstNodeType op, Location loc, bool undo, bool sv_mode)
 		{
@@ -409,7 +409,7 @@
 		}
 
 		// add a binary operator assignment statement, e.g., a += b
-		std::unique_ptr<AstNode> ParseState::addAsgnBinopStmt(std::unique_ptr<dict<IdString, std::unique_ptr<AstNode>>> attr,
+		std::unique_ptr<AstNode> ParseState::addAsgnBinopStmt(std::unique_ptr<dict<std::string, std::unique_ptr<AstNode>>> attr,
 								      std::unique_ptr<AstNode> eq_lhs, AST::AstNodeType op, std::unique_ptr<AstNode> rhs)
 		{
 			Location loc = location_range(eq_lhs->location, rhs->location);
@@ -474,7 +474,7 @@
 
 	using string_t = std::unique_ptr<std::string>;
 	using ast_t = std::unique_ptr<YOSYS_NAMESPACE_PREFIX AST::AstNode>;
-	using al_t = std::unique_ptr<YOSYS_NAMESPACE_PREFIX dict<YOSYS_NAMESPACE_PREFIX RTLIL::IdString, std::unique_ptr<YOSYS_NAMESPACE_PREFIX AST::AstNode>>>;
+	using al_t = std::unique_ptr<YOSYS_NAMESPACE_PREFIX dict<std::string, std::unique_ptr<YOSYS_NAMESPACE_PREFIX AST::AstNode>>>;
 	using specify_target_ptr_t = std::unique_ptr<struct specify_target>;
 	using specify_triple_ptr_t = std::unique_ptr<struct specify_triple>;
 	using specify_rise_fall_ptr_t = std::unique_ptr<struct specify_rise_fall>;
@@ -522,7 +522,7 @@
 %token TOK_BIT_OR_ASSIGN TOK_BIT_AND_ASSIGN TOK_BIT_XOR_ASSIGN TOK_ADD_ASSIGN
 %token TOK_SUB_ASSIGN TOK_DIV_ASSIGN TOK_MOD_ASSIGN TOK_MUL_ASSIGN
 %token TOK_SHL_ASSIGN TOK_SHR_ASSIGN TOK_SSHL_ASSIGN TOK_SSHR_ASSIGN
-%token TOK_BIND TOK_TIME_SCALE
+%token TOK_TIME_SCALE
 %token TOK_IMPORT
 
 %token TOK_EXCL "'!'"
@@ -587,7 +587,7 @@
 %left OP_SHL OP_SHR OP_SSHL OP_SSHR
 %left TOK_PLUS TOK_MINUS
 %left TOK_ASTER TOK_SLASH TOK_PERC
-%left OP_POW
+%right OP_POW
 %precedence OP_CAST
 %precedence UNARY_OPS
 
@@ -622,14 +622,13 @@ design:
 	package design |
 	import_stmt design |
 	interface design |
-	bind_directive design |
 	%empty;
 
 attr:
 	{
 		if (extra->attr_list)
 			extra->attr_list_stack.push(std::move(extra->attr_list));
-		extra->attr_list = std::make_unique<dict<IdString, std::unique_ptr<AstNode>>>();
+		extra->attr_list = std::make_unique<dict<std::string, std::unique_ptr<AstNode>>>();
 		for (auto &it : extra->default_attr_list)
 			(*extra->attr_list)[it.first] = it.second->clone();
 	} attr_opt {
@@ -651,7 +650,7 @@ defattr:
 	DEFATTR_BEGIN {
 		if (extra->attr_list != nullptr)
 			extra->attr_list_stack.push(std::move(extra->attr_list));
-		extra->attr_list = std::make_unique<dict<IdString, std::unique_ptr<AstNode>>>();
+		extra->attr_list = std::make_unique<dict<std::string, std::unique_ptr<AstNode>>>();
 		extra->default_attr_list.clear();
 	} opt_attr_list {
 		extra->attr_list->swap(extra->default_attr_list);
@@ -893,29 +892,7 @@ interface_body:
 
 interface_body_stmt:
 	param_decl | localparam_decl | typedef_decl | defparam_decl | wire_decl | always_stmt | assign_stmt |
-	modport_stmt | bind_directive;
-
-bind_directive:
-	TOK_BIND {
-		(void)extra->pushChild(std::make_unique<AstNode>(@$, AST_BIND));
-	}
-	bind_target {
-		// bind_target should have added at least one child
-		log_assert(extra->ast_stack.back()->children.size() >= 1);
-	}
-	TOK_ID {
-		// The single_cell parser in cell_list_no_array uses extra->astbuf1 as
-		// a sort of template for constructing cells.
-		extra->astbuf1 = std::make_unique<AstNode>(@$, AST_CELL);
-		extra->astbuf1->children.push_back(std::make_unique<AstNode>(@$, AST_CELLTYPE));
-		extra->astbuf1->children[0]->str = *$5;
-	}
-	cell_parameter_list_opt cell_list_no_array TOK_SEMICOL {
-		// cell_list should have added at least one more child
-		log_assert(extra->ast_stack.back()->children.size() >= 2);
-		(void)extra->astbuf1.reset();
-		extra->ast_stack.pop_back();
-	};
+	modport_stmt;
 
 // bind_target matches the target of the bind (everything before
 // bind_instantiation in the IEEE 1800 spec).
@@ -1137,7 +1114,7 @@ module_body:
 
 module_body_stmt:
 	task_func_decl | specify_block | param_decl | localparam_decl | typedef_decl | defparam_decl | specparam_declaration | wire_decl | assign_stmt | cell_stmt |
-	enum_decl | struct_decl | bind_directive |
+	enum_decl | struct_decl |
 	always_stmt | TOK_GENERATE module_gen_body TOK_ENDGENERATE | defattr | assert_property | checker_decl | ignored_specify_block;
 
 checker_decl:
@@ -1314,7 +1291,7 @@ task_func_port:
 		if (!extra->astbuf1) {
 			if (!mode->sv)
 				err_at_loc(@$, "task/function argument direction missing");
-			extra->albuf = std::make_unique<dict<IdString, std::unique_ptr<AstNode>>>();
+			extra->albuf = std::make_unique<dict<std::string, std::unique_ptr<AstNode>>>();
 			extra->astbuf1 = std::make_unique<AstNode>(@$, AST_WIRE);
 			extra->current_wire_rand = false;
 			extra->current_wire_const = false;
@@ -2923,7 +2900,7 @@ behavioral_stmt:
 				// we have to undangle it from the stack
 				patch_block_on_stack = true;
 			} else if (outer->get_bool_attribute(ID::full_case))
-				(*$1)[ID::full_case] = AstNode::mkconst_int(@$, 1, false);
+				(*$1)[ID::str(ID::full_case)] = AstNode::mkconst_int(@$, 1, false);
 		}
 		auto expr = std::make_unique<AstNode>(@$, AST_REDUCE_BOOL, std::move($4));
 		if (!node) {
@@ -2969,22 +2946,22 @@ if_attr:
 		AstNode *context = extra->ast_stack.back();
 		if (context && context->type == AST_BLOCK && context->get_bool_attribute(ID::promoted_if))
 			err_at_loc(@2, "unique0 keyword cannot be used for 'else if' branch.");
-		(*$1)[ID::parallel_case] = AstNode::mkconst_int(@$, 1, false);
+		(*$1)[ID::str(ID::parallel_case)] = AstNode::mkconst_int(@$, 1, false);
 		$$ = std::move($1);
 	} |
 	attr TOK_PRIORITY {
 		AstNode *context = extra->ast_stack.back();
 		if (context && context->type == AST_BLOCK && context->get_bool_attribute(ID::promoted_if))
 			err_at_loc(@2, "priority keyword cannot be used for 'else if' branch.");
-		(*$1)[ID::full_case] = AstNode::mkconst_int(@$, 1, false);
+		(*$1)[ID::str(ID::full_case)] = AstNode::mkconst_int(@$, 1, false);
 		$$ = std::move($1);
 	} |
 	attr TOK_UNIQUE {
 		AstNode *context = extra->ast_stack.back();
 		if (context && context->type == AST_BLOCK && context->get_bool_attribute(ID::promoted_if))
 			err_at_loc(@2, "unique keyword cannot be used for 'else if' branch.");
-		(*$1)[ID::full_case] = AstNode::mkconst_int(@$, 1, false);
-		(*$1)[ID::parallel_case] = AstNode::mkconst_int(@$, 1, false);
+		(*$1)[ID::str(ID::full_case)] = AstNode::mkconst_int(@$, 1, false);
+		(*$1)[ID::str(ID::parallel_case)] = AstNode::mkconst_int(@$, 1, false);
 		$$ = std::move($1);
 	};
 
@@ -2993,16 +2970,16 @@ case_attr:
 		$$ = std::move($1);
 	} |
 	attr TOK_UNIQUE0 {
-		(*$1)[ID::parallel_case] = AstNode::mkconst_int(@$, 1, false);
+		(*$1)[ID::str(ID::parallel_case)] = AstNode::mkconst_int(@$, 1, false);
 		$$ = std::move($1);
 	} |
 	attr TOK_PRIORITY {
-		(*$1)[ID::full_case] = AstNode::mkconst_int(@$, 1, false);
+		(*$1)[ID::str(ID::full_case)] = AstNode::mkconst_int(@$, 1, false);
 		$$ = std::move($1);
 	} |
 	attr TOK_UNIQUE {
-		(*$1)[ID::full_case] = AstNode::mkconst_int(@$, 1, false);
-		(*$1)[ID::parallel_case] = AstNode::mkconst_int(@$, 1, false);
+		(*$1)[ID::str(ID::full_case)] = AstNode::mkconst_int(@$, 1, false);
+		(*$1)[ID::str(ID::parallel_case)] = AstNode::mkconst_int(@$, 1, false);
 		$$ = std::move($1);
 	};
 

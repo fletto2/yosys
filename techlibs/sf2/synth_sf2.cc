@@ -29,6 +29,19 @@ struct SynthSf2Pass : public ScriptPass
 {
 	SynthSf2Pass() : ScriptPass("synth_sf2", "synthesis for SmartFusion2 and IGLOO2 FPGAs") { }
 
+	void on_register() override
+	{
+		target_register.emplace("sf2", Target{
+			"Microchip SmartFusion2",
+			{
+				{"", { // default
+					"",
+					{"+/sf2/cells_sim.v"}
+				}}
+			}
+		});
+	}
+
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
@@ -223,7 +236,7 @@ struct SynthSf2Pass : public ScriptPass
 				} else {
 					run("clkbufmap -buf CLKINT Y:A");
 				}
-				run("iopadmap -bits -inpad INBUF Y:PAD -outpad OUTBUF D:PAD -toutpad TRIBUFF E:D:PAD -tinoutpad BIBUF E:Y:D:PAD", "(unless -noiobs)");
+				run("iopadmap -bits -inpad INBUF Y:PAD -outpad OUTBUF D:PAD -toutpad TRIBUFF E:D:PAD -tinoutpad BIBUF E:Y:D:PAD A:top", "(unless -noiobs)");
 			}
 			run("clean -purge");
 		}

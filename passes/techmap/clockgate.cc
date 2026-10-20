@@ -8,11 +8,11 @@ USING_YOSYS_NAMESPACE
 PRIVATE_NAMESPACE_BEGIN
 
 struct ClockGateCell {
-	IdString name;
-	IdString ce_pin;
-	IdString clk_in_pin;
-	IdString clk_out_pin;
-	std::vector<IdString> tie_lo_pins;
+	std::string name;
+	std::string ce_pin;
+	std::string clk_in_pin;
+	std::string clk_out_pin;
+	std::vector<std::string> tie_lo_pins;
 };
 
 ClockGateCell icg_from_arg(std::string& name, std::string& str) {
@@ -21,13 +21,13 @@ ClockGateCell icg_from_arg(std::string& name, std::string& str) {
 	char delimiter = ':';
 	size_t pos1 = str.find(delimiter);
 	if (pos1 == std::string::npos)
-		log_cmd_error("Not enough ports in descriptor string");
+		log_cmd_error("Not enough ports in descriptor string\n");
 	size_t pos2 = str.find(delimiter, pos1 + 1);
 	if (pos2 == std::string::npos)
-		log_cmd_error("Not enough ports in descriptor string");
+		log_cmd_error("Not enough ports in descriptor string\n");
 	size_t pos3 = str.find(delimiter, pos2 + 1);
 	if (pos3 != std::string::npos)
-		log_cmd_error("Too many ports in descriptor string");
+		log_cmd_error("Too many ports in descriptor string\n");
 
 	std::string ce = str.substr(0, pos1);
 	c.ce_pin = RTLIL::escape_id(ce);
@@ -128,17 +128,17 @@ static std::pair<std::optional<ClockGateCell>, std::optional<ClockGateCell>>
 		}
 
 		if (icg_interface.clk_in_pin.empty()) {
-			log_warning("Malformed liberty file - missing clock_gate_clock_pin in cell %s",
+			log_warning("Malformed liberty file - missing clock_gate_clock_pin in cell %s\n",
 				cell_name.c_str());
 			continue;
 		}
 		if (icg_interface.clk_out_pin.empty()) {
-			log_warning("Malformed liberty file - missing clock_gate_out_pin in cell %s",
+			log_warning("Malformed liberty file - missing clock_gate_out_pin in cell %s\n",
 				cell_name.c_str());
 			continue;
 		}
 		if (icg_interface.ce_pin.empty()) {
-			log_warning("Malformed liberty file - missing clock_gate_enable_pin in cell %s",
+			log_warning("Malformed liberty file - missing clock_gate_enable_pin in cell %s\n",
 				cell_name.c_str());
 			continue;
 		}
@@ -308,7 +308,7 @@ struct ClockgatePass : public Pass {
 			LibertyMergedCells merged;
 			for (auto path : liberty_files) {
 				std::istream* f = uncompressed(path);
-				LibertyParser p(*f, path);
+				LibertyParser p(*f, path, liberty_synth_filter);
 				merged.merge(p);
 				delete f;
 			}
@@ -371,7 +371,8 @@ struct ClockgatePass : public Pass {
 				if (!matching_icg_desc)
 					continue;
 
-				Cell* icg = module->addCell(NEW_ID, matching_icg_desc->name);
+				auto& twines = module->twines();
+				Cell* icg = module->addCell(NEW_ID, twines.add(matching_icg_desc->name));
 				icg->setPort(matching_icg_desc->ce_pin, clk.ce_bit);
 				icg->setPort(matching_icg_desc->clk_in_pin, clk.clk_bit);
 				gclk.new_net = module->addWire(NEW_ID);

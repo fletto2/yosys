@@ -65,7 +65,7 @@ struct QlBramTypesPass : public Pass {
 		case 6:
 			return 2;
 		default:
-			log_error("Invalid mode: %x", mode);
+			log_error("Invalid mode: %x\n", mode);
 		}
 	}
 
@@ -154,7 +154,7 @@ struct QlBramTypesPass : public Pass {
 					type += "nonsplit";
 				}
 
-				cell->type = RTLIL::escape_id(type);
+				cell->type = cell->twines().add(RTLIL::escape_id(type));
 				log_debug("Changed type of memory cell %s to %s\n", cell->name.unescape(), cell->type.unescape());
 			}
 	}

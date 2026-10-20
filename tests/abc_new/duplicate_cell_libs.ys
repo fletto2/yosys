@@ -1,0 +1,16 @@
+# https://github.com/YosysHQ/yosys/issues/4977
+
+# abc rejects the duplicated cell and aborts the script without writing output
+logger -expect log "There are two standard cells with the same name" 1
+logger -expect error "output\.aig' not found" 1
+read_verilog <<EOT
+module top(input a, b, output y);
+	assign y = ~(a & b);
+endmodule
+EOT
+
+hierarchy -top top
+techmap
+
+libcache -scl -disable
+abc_new -liberty openroad/cm_test_cells.lib -liberty dup_inv.lib

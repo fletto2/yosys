@@ -116,6 +116,26 @@ struct BtorWorker
 		info_lines.push_back(fmt.format(args...));
 	}
 
+	bool srcsym_taken(const string &sym)
+	{
+		return srcsymbols.count(sym) || module->count_id(module->twines().find("\\" + sym));
+	}
+
+	string uniquify_srcsym(string src)
+	{
+		if (srcsym_taken(src)) {
+			for (int i = 1;; i++) {
+				string s = stringf("%s-%d", src.c_str(), i);
+				if (!srcsym_taken(s)) {
+					src = s;
+					break;
+				}
+			}
+		}
+		srcsymbols.insert(src);
+		return src;
+	}
+
 	template<typename T>
 	string getinfo(T *obj, bool srcsym = false)
 	{
@@ -125,17 +145,7 @@ struct BtorWorker
 			string src = obj->attributes.at(ID::src).decode_string().c_str();
 			if (srcsym && infostr[0] == '$') {
 				std::replace(src.begin(), src.end(), ' ', '_');
-				if (srcsymbols.count(src) || module->count_id("\\" + src)) {
-					for (int i = 1;; i++) {
-						string s = stringf("%s-%d", src, i);
-						if (!srcsymbols.count(s) && !module->count_id("\\" + s)) {
-							src = s;
-							break;
-						}
-					}
-				}
-				srcsymbols.insert(src);
-				infostr = src;
+				infostr = uniquify_srcsym(std::move(src));
 			} else {
 				infostr += " ; " + src;
 			}
@@ -507,7 +517,7 @@ struct BtorWorker
 			goto okay;
 		}
 
-		if (cell->type.in(ID($not), ID($neg), ID($_NOT_), ID($pos), ID($buf), ID($_BUF_)))
+		if (cell->type.in(ID($not), ID($neg), ID($_NOT_), ID($pos), ID($buf), ID($_BUF_), ID($barrier)))
 		{
 			string btor_op;
 			if (cell->type.in(ID($not), ID($_NOT_))) btor_op = "not";
@@ -519,9 +529,9 @@ struct BtorWorker
 			int nid_a = get_sig_nid(cell->getPort(ID::A), width, a_signed);
 			SigSpec sig = sigmap(cell->getPort(ID::Y));
 
-			// the $pos/$buf cells just pass through, all other cells need an actual operation applied
+			// buffer cells just pass through, all other cells need an actual operation applied
 			int nid = nid_a;
-			if (!cell->type.in(ID($pos), ID($buf), ID($_BUF_)))
+			if (!cell->type.in(ID($pos), ID($buf), ID($_BUF_), ID($barrier)))
 			{
 				log_assert(!btor_op.empty());
 				int sid = get_bv_sid(width);
@@ -697,13 +707,13 @@ struct BtorWorker
 					ywmap_clock_bits[sig_c] |= negedge ? 2 : 1;
 			}
 
-			IdString symbol;
+			Wire *symbol = nullptr;
 
 			if (sig_q.is_wire()) {
 				Wire *w = sig_q.as_wire();
 				if (w->port_id == 0) {
 					statewires.insert(w);
-					symbol = w->name;
+					symbol = w;
 				}
 			}
 
@@ -723,10 +733,10 @@ struct BtorWorker
 			int sid = get_bv_sid(GetSize(sig_q));
 			int nid = next_nid++;
 
-			if (symbol.empty() || (!print_internal_names && symbol[0] == '$'))
+			if (symbol == nullptr || (!print_internal_names && !symbol->name.isPublic()))
 				btorf("%d state %d\n", nid, sid);
 			else
-				btorf("%d state %d %s\n", nid, sid, symbol.unescape());
+				btorf("%d state %d %s\n", nid, sid, symbol->name.unescape());
 
 			if (cell->get_bool_attribute(ID(clk2fflogic)))
 				ywmap_state(cell->getPort(ID::D)); // For a clk2fflogic FF the named signal is the D input not the Q output
@@ -746,7 +756,7 @@ struct BtorWorker
 		}
 
 		if (cell->type.in(ID($allconst), ID($allseq)))
-			log_error("Unsupported cell type %s for cell %s.%s",
+			log_error("Unsupported cell type %s for cell %s.%s\n",
 					cell->type.unescape(), module, cell);
 
 
@@ -873,7 +883,7 @@ struct BtorWorker
 			int nid = next_nid++;
 			int nid_head = nid;
 
-			if (mem->memid[0] == '$')
+			if (!mem->memid.isPublic())
 				btorf("%d state %d\n", nid, sid);
 			else
 				btorf("%d state %d %s\n", nid, sid, mem->memid.unescape());
@@ -1178,10 +1188,10 @@ struct BtorWorker
 
 		memories = Mem::get_all_memories(module);
 
-		dict<IdString, Mem*> mem_dict;
+		dict<std::string, Mem*> mem_dict;
 		for (auto &mem : memories) {
 			mem.narrow();
-			mem_dict[mem.memid] = &mem;
+			mem_dict[mem.memid.str()] = &mem;
 		}
 		for (auto cell : module->cells())
 			if (cell->is_mem_cell())
@@ -1276,7 +1286,7 @@ struct BtorWorker
 						cell->type.unescape(), module, cell);
 
 			if (cell->type.in(ID($live), ID($fair), ID($equiv)))
-				log_error("Unsupported cell type %s for cell %s.%s",
+				log_error("Unsupported cell type %s for cell %s.%s\n",
 						cell->type.unescape(), module, cell);
 
 			if (cell->type == ID($assume))
@@ -1352,7 +1362,7 @@ struct BtorWorker
 
 		for (auto wire : module->wires())
 		{
-			if (wire->port_id || wire->name[0] == '$')
+			if (wire->port_id || !wire->name.isPublic())
 				continue;
 
 			btorf_push(stringf("wire %s", wire));

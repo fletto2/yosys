@@ -80,7 +80,7 @@ struct Ice40RadiantPass : public Pass {
 			for (auto cell : cells) {
 				IdString t = cell->type;
 				auto port = [&](const char *name) {
-					IdString id = RTLIL::escape_id(name);
+					IdString id = module->twines().add(RTLIL::escape_id(name));
 					return cell->hasPort(id) ? cell->getPort(id) : SigSpec();
 				};
 				// a port that Radiant splits into scalar bits (A15 .. A0)
@@ -93,7 +93,7 @@ struct Ice40RadiantPass : public Pass {
 					return s;
 				};
 				auto param = [&](const char *name, const char *dflt) {
-					IdString id = RTLIL::escape_id(name);
+					IdString id = module->twines().add(RTLIL::escape_id(name));
 					return cell->hasParam(id) ? cell->getParam(id) : Const(std::string(dflt));
 				};
 				Cell *n = nullptr;
@@ -251,7 +251,7 @@ struct Ice40RadiantPass : public Pass {
 					make("SB_LFOSC");
 					conn("CLKLFPU", port("CLKLFPU")); conn("CLKLFEN", port("CLKLFEN")); conn("CLKLF", port("CLKLF"));
 					if (param("FABRIC_TRIME", "DISABLE").decode_string() == "ENABLE")
-						log_warning("%s: SB_LFOSC has no trim inputs, TRIM of %s ignored.\n", log_id(module), log_id(cell));
+						log_warning("%s: SB_LFOSC has no trim inputs, TRIM of %s ignored.\n", module, cell);
 				} else if (t == ID(RGB_CORE)) {
 					make("SB_RGBA_DRV");
 					for (auto p : {"CURREN", "RGBLEDEN", "RGB0PWM", "RGB1PWM", "RGB2PWM", "RGB0", "RGB1", "RGB2"})
@@ -260,7 +260,7 @@ struct Ice40RadiantPass : public Pass {
 					for (auto p : {"RGB0_CURRENT", "RGB1_CURRENT", "RGB2_CURRENT"})
 						n->setParam(RTLIL::escape_id(p), Const(bin_string(param(p, "0b000000"), 6)));
 					if (param("FABRIC_TRIME", "DISABLE").decode_string() == "ENABLE")
-						log_warning("%s: SB_RGBA_DRV has no trim inputs, TRIM of %s ignored.\n", log_id(module), log_id(cell));
+						log_warning("%s: SB_RGBA_DRV has no trim inputs, TRIM of %s ignored.\n", module, cell);
 				} else if (t == ID(RGBPWM)) {
 					make("SB_LEDDA_IP");
 					for (auto p : {"LEDDCS", "LEDDCLK", "LEDDDEN", "LEDDEXE", "PWMOUT0", "PWMOUT1", "PWMOUT2", "LEDDON"})
@@ -359,7 +359,7 @@ struct Ice40RadiantPass : public Pass {
 					SigSpec ce = port("CE");
 					if (ce.empty()) ce = State::S1;
 					if (param("DDROUT", "NO").decode_string() == "YES" && !port("PADDO").empty())
-						log_error("%s: DDR output of %s is not supported.\n", log_id(module), log_id(cell));
+						log_error("%s: DDR output of %s is not supported.\n", module, cell);
 					auto ff = [&](const char *type, SigSpec clk, SigSpec d, SigSpec q) {
 						if (q.empty() || clk.empty() || clk == SigSpec(State::S0))
 							return;
@@ -397,7 +397,7 @@ struct Ice40RadiantPass : public Pass {
 						SigSpec co = h ? port(ccu ? "COUT" : "CO1") : co0;
 						// named after the FA2 so the placer can put the LUT and the carry of a
 						// half in one logic cell even when all their inputs are constants
-						Cell *l = module->addCell(stringf("%s$lut%d", cell->name.c_str(), h), ID(SB_LUT4));
+						Cell *l = module->addCell(stringf("%s$lut%d", cell->name.str(), h), ID(SB_LUT4));
 						l->setPort(ID(I0), a.empty() ? SigSpec(State::S0) : a);
 						l->setPort(ID(I1), b.empty() ? SigSpec(State::S0) : b);
 						l->setPort(ID(I2), c.empty() ? SigSpec(State::S0) : c);
@@ -409,7 +409,7 @@ struct Ice40RadiantPass : public Pass {
 						if (sum.empty())
 							l->set_bool_attribute(ID::keep);
 						// Radiant enables the carry of both halves even where nothing reads it
-						Cell *k = module->addCell(stringf("%s$carry%d", cell->name.c_str(), h), ID(SB_CARRY));
+						Cell *k = module->addCell(stringf("%s$carry%d", cell->name.str(), h), ID(SB_CARRY));
 						k->setPort(ID(I0), b.empty() ? SigSpec(State::S0) : b);
 						k->setPort(ID(I1), c.empty() ? SigSpec(State::S0) : c);
 						// an unconnected carry-in is 1 in Radiant's model
@@ -469,14 +469,14 @@ struct Ice40RadiantPass : public Pass {
 					if (!ok)
 						continue;
 					for (auto ff : clocked.at(y)) {
-						ff->type = RTLIL::escape_id("SB_DFFN" + ff->type.str().substr(7));
+						ff->type = ff->twines().add(RTLIL::escape_id("SB_DFFN" + ff->type.str().substr(7)));
 						ff->setPort(ID::C, c->getPort(ID::A));
 					}
 					module->remove(c);
 				}
 			}
 			if (count)
-				log("%s: %d Radiant primitives replaced.\n", log_id(module), count);
+				log("%s: %d Radiant primitives replaced.\n", module, count);
 		}
 	}
 } Ice40RadiantPass;

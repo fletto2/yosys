@@ -83,7 +83,7 @@ struct Ice40LseAluPass : public Pass {
 			}
 			for (auto cell : soft)
 				cell->set_bool_attribute(ID(ice40_lsealu));
-			log("%s: %d $alu cells mapped to LUT logic.\n", log_id(module), GetSize(soft));
+			log("%s: %d $alu cells mapped to LUT logic.\n", module, GetSize(soft));
 		}
 		Pass::call(design, "techmap a:ice40_lsealu");
 	}
@@ -382,7 +382,7 @@ struct Ice40LseAddEnablePass : public Pass {
 					break;
 				}
 			}
-			log("%s: folded %d enables into adders.\n", log_id(module), count);
+			log("%s: folded %d enables into adders.\n", module, count);
 		}
 	}
 } Ice40LseAddEnablePass;
@@ -503,7 +503,7 @@ struct Ice40LseRamCePass : public Pass {
 					if (w->port_output)
 						for (int i = 0; i < w->width; i++) {
 							SigBit b = sigmap(SigBit(w, i));
-							auto key = std::make_pair(w->name, i);
+							auto key = std::make_pair(IdString(w->name), i);
 							if (bits.count(b) && (!out_ram[module->name].count(key) || out_ram[module->name].at(key) != bits.at(b))) {
 								out_ram[module->name][key] = bits.at(b);
 								changed = true;
@@ -527,7 +527,7 @@ struct Ice40LseRamCePass : public Pass {
 							if (!pb.count(b)) { all = false; break; }
 							for (auto &r : pb.at(b)) rams.insert(r);
 						}
-						auto key = std::make_pair(w->name, i);
+						auto key = std::make_pair(IdString(w->name), i);
 						if (all && (!in_ram[sub->name].count(key) || in_ram[sub->name].at(key) != rams)) {
 							in_ram[sub->name][key] = rams;
 							changed = true;
@@ -631,7 +631,7 @@ struct Ice40LseRamCePass : public Pass {
 				cell->setPort(ID::D, nd);
 				cell->type = noen.at(cell->type);
 			}
-			log("%s: %d flip-flops lose their enable.\n", log_id(module), GetSize(todo));
+			log("%s: %d flip-flops lose their enable.\n", module, GetSize(todo));
 
 			// a register that addresses a RAM gets neither a clock enable nor a synchronous
 			// reset/set pin: LSE builds both into the logic in front of it
@@ -706,7 +706,7 @@ struct Ice40LseRamCePass : public Pass {
 				nsr++;
 			}
 			if (nsr)
-				log("%s: %d RAM address flip-flops lose their enable/synchronous reset.\n", log_id(module), nsr);
+				log("%s: %d RAM address flip-flops lose their enable/synchronous reset.\n", module, nsr);
 		}
 	}
 } Ice40LseRamCePass;
@@ -951,7 +951,7 @@ struct Ice40LsePolarityPass : public Pass {
 				if (flips == 0)
 					break;
 			}
-			log("%s: complemented %d LUTs.\n", log_id(module), count);
+			log("%s: complemented %d LUTs.\n", module, count);
 		}
 	}
 } Ice40LsePolarityPass;
@@ -1188,7 +1188,7 @@ struct Ice40LseCmpPass : public Pass {
 				module->remove(cell);
 				count++;
 			}
-			log("%s: %d comparisons built as %d LUTs.\n", log_id(module), count, count_luts);
+			log("%s: %d comparisons built as %d LUTs.\n", module, count, count_luts);
 		}
 	}
 } Ice40LseCmpPass;
@@ -1291,7 +1291,7 @@ struct Ice40LseMuxChainPass : public Pass {
 					count++;
 				}
 			}
-			log("%s: %d priority chains built as 4:1 muxes.\n", log_id(module), count);
+			log("%s: %d priority chains built as 4:1 muxes.\n", module, count);
 		}
 	}
 } Ice40LseMuxChainPass;
@@ -1470,7 +1470,7 @@ struct Ice40LseMuxSelPass : public Pass {
 				}
 				count++;
 			}
-			log("%s: %d shared selects split into their multiplexers.\n", log_id(module), count);
+			log("%s: %d shared selects split into their multiplexers.\n", module, count);
 		}
 	}
 } Ice40LseMuxSelPass;
@@ -1616,7 +1616,7 @@ struct Ice40LseReducePass : public Pass {
 					break;
 				}
 			}
-			log("%s: %d OR trees moved above a multiplexer.\n", log_id(module), count);
+			log("%s: %d OR trees moved above a multiplexer.\n", module, count);
 		}
 	}
 } Ice40LseReducePass;
@@ -1726,7 +1726,7 @@ struct Ice40LseMuxCmpPass : public Pass {
 					module->remove(c);
 					module->addMux(NEW_ID, ya, yb, sel, cy);
 				}
-				log("  %s (%s)\n", log_id(mux), log_signal(mux->getPort(ID::Y)));
+				log("  %s (%s)\n", mux, log_signal(mux->getPort(ID::Y)));
 				module->remove(mux);
 				count++;
 				// readers changed: rebuild before the next multiplexer
@@ -1737,7 +1737,7 @@ struct Ice40LseMuxCmpPass : public Pass {
 							for (auto b : sigmap(conn.second))
 								readers[b].push_back(cell);
 			}
-			log("%s: %d multiplexers replaced by compares of both inputs.\n", log_id(module), count);
+			log("%s: %d multiplexers replaced by compares of both inputs.\n", module, count);
 		}
 	}
 } Ice40LseMuxCmpPass;
@@ -1825,7 +1825,7 @@ struct Ice40LseCutPass : public Pass {
 						count++;
 					}
 				}
-				log("%s: %d conditions marked.\n", log_id(module), count);
+				log("%s: %d conditions marked.\n", module, count);
 				continue;
 			}
 			if (remove) {
@@ -1838,7 +1838,7 @@ struct Ice40LseCutPass : public Pass {
 					module->remove(cell);
 					count++;
 				}
-				log("%s: %d cuts removed.\n", log_id(module), count);
+				log("%s: %d cuts removed.\n", module, count);
 				continue;
 			}
 			SigMap sigmap(module);
@@ -1879,7 +1879,7 @@ struct Ice40LseCutPass : public Pass {
 						cell->setPort(conn.first, sig);
 				}
 			}
-			log("%s: %d nets cut.\n", log_id(module), count);
+			log("%s: %d nets cut.\n", module, count);
 		}
 	}
 } Ice40LseCutPass;
@@ -2018,7 +2018,7 @@ struct Ice40LseTwoWayPass : public Pass {
 					break;
 				}
 			}
-			log("%s: %d multiplexer trees over two words reduced.\n", log_id(module), count);
+			log("%s: %d multiplexer trees over two words reduced.\n", module, count);
 		}
 	}
 } Ice40LseTwoWayPass;
@@ -2142,7 +2142,7 @@ struct Ice40LseAndSrPass : public Pass {
 				}
 				module->remove(cell);
 			}
-			log("%s: %d flip-flops reset by a factor of their AND.\n", log_id(module), count);
+			log("%s: %d flip-flops reset by a factor of their AND.\n", module, count);
 		}
 	}
 } Ice40LseAndSrPass;
@@ -2261,7 +2261,7 @@ struct Ice40LseAddLoadPass : public Pass {
 					break;
 				}
 			}
-			log("%s: %d loads folded into adders.\n", log_id(module), count);
+			log("%s: %d loads folded into adders.\n", module, count);
 		}
 	}
 } Ice40LseAddLoadPass;
@@ -2365,10 +2365,10 @@ struct Ice40LseHoldSelPass : public Pass {
 				SigSpec data = module->Mux(NEW_ID, w0, w1, path);
 				SigSpec next = module->Mux(NEW_ID, data, ff->getPort(ID::Q), hold);
 				ff->setPort(ID::D, next);
-				log("  %s: select %s over %s and %s\n", log_id(ff), log_signal(path), log_signal(w1), log_signal(w0));
+				log("  %s: select %s over %s and %s\n", ff, log_signal(path), log_signal(w1), log_signal(w0));
 				count++;
 			}
-			log("%s: %d register selects rebuilt.\n", log_id(module), count);
+			log("%s: %d register selects rebuilt.\n", module, count);
 		}
 	}
 } Ice40LseHoldSelPass;
@@ -2482,7 +2482,7 @@ struct Ice40LseTogglePass : public Pass {
 				log_debug("  %s toggles on %s\n", log_signal(a), log_signal(sel));
 				count++;
 			}
-			log("%s: %d toggles made XORs.\n", log_id(module), count);
+			log("%s: %d toggles made XORs.\n", module, count);
 		}
 	}
 } Ice40LseTogglePass;
@@ -2643,7 +2643,7 @@ struct Ice40LseCeCostPass : public Pass {
 			}
 			if (dropped)
 				Pass::call_on_selection(design, sel, "dffunmap -ce-only");
-			log("%s: %d enables dropped.\n", log_id(module), dropped);
+			log("%s: %d enables dropped.\n", module, dropped);
 		}
 	}
 } Ice40LseCeCostPass;
@@ -2680,7 +2680,7 @@ struct Ice40LseMemLogicPass : public Pass {
 			for (auto cell : module->selected_cells()) {
 				if (!cell->type.in(ID($memrd), ID($memrd_v2)) || cell->getParam(ID::CLK_ENABLE).as_bool())
 					continue;
-				IdString memid = cell->getParam(ID::MEMID).decode_string();
+				IdString memid = module->twines().add(cell->getParam(ID::MEMID).decode_string());
 				if (logic.count(memid))
 					continue;
 				// the selected data: outputs of muxes with the read data on one side, a constant on the other
@@ -2736,7 +2736,7 @@ struct Ice40LseMemLogicPass : public Pass {
 				}
 				if (bad || GetSize(conds) > 1) {
 					logic.insert(memid);
-					log("  %s: %s stays in logic.\n", log_id(module), log_id(memid));
+					log("  %s: %s stays in logic.\n", module, module->twines().unescaped_str(memid));
 				}
 			}
 			for (auto memid : logic)
@@ -2826,7 +2826,7 @@ struct Ice40LseOneHotMuxPass : public Pass {
 					count++;
 				}
 			}
-			log("%s: %d cases on state machines kept as AND-OR.\n", log_id(module), count);
+			log("%s: %d cases on state machines kept as AND-OR.\n", module, count);
 		}
 	}
 } Ice40LseOneHotMuxPass;
@@ -2909,7 +2909,7 @@ struct Ice40LseWrapPass : public Pass {
 				module->remove(mux);
 				count++;
 			}
-			log("%s: %d wrap-around compares dropped.\n", log_id(module), count);
+			log("%s: %d wrap-around compares dropped.\n", module, count);
 		}
 	}
 } Ice40LseWrapPass;
@@ -2999,7 +2999,7 @@ struct Ice40LseChainPass : public Pass {
 				l->set_bool_attribute(ID::keep);
 				pads++;
 			}
-			log("%s: %d top carries restored, %d chains padded.\n", log_id(module), tops, pads);
+			log("%s: %d top carries restored, %d chains padded.\n", module, tops, pads);
 		}
 	}
 } Ice40LseChainPass;

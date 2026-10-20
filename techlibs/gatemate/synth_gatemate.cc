@@ -29,6 +29,19 @@ struct SynthGateMatePass : public ScriptPass
 {
 	SynthGateMatePass() : ScriptPass("synth_gatemate", "synthesis for Cologne Chip GateMate FPGAs") { }
 
+	void on_register() override
+	{
+		target_register.emplace("gatemate", Target{
+			"Cologne Chip GateMate",
+			{
+				{"", { // default
+					"",
+					{"+/gatemate/cells_sim.v", "+/gatemate/cells_bb.v"}
+				}}
+			}
+		});
+	}
+
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
@@ -230,8 +243,8 @@ struct SynthGateMatePass : public ScriptPass
 			run("tribuf -logic");
 			run("deminout");
 			run("opt_expr");
-			run("opt_clean");
 			run("check");
+			run("opt_clean");
 			run("opt -nodffe -nosdff");
 			run("fsm");
 			run("opt");
@@ -287,7 +300,7 @@ struct SynthGateMatePass : public ScriptPass
 				"-inpad CC_IBUF Y:I "
 				"-outpad CC_OBUF A:O "
 				"-toutpad CC_TOBUF ~T:A:O "
-				"-tinoutpad CC_IOBUF ~T:Y:A:IO"
+				"-tinoutpad CC_IOBUF ~T:Y:A:IO A:top"
 			);
 			run("clean");
 		}

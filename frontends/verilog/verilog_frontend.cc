@@ -93,7 +93,7 @@ static void set_syn_attr(AST::AstNode *node, const std::string &name, const std:
 	auto mk = [&](const std::string &v, bool num, long k) {
 		return num ? AST::AstNode::mkconst_int(node->location, k, false) : AST::AstNode::mkconst_str(node->location, v);
 	};
-	node->attributes[RTLIL::escape_id(name)] = mk(value, numeric, n);
+	node->attributes[AST::intern_attr_name(RTLIL::escape_id(name))] = mk(value, numeric, n);
 	if (name == "syn_hier" && (value == "hard" || value == "firm" || value == "fixed"))
 		node->attributes[ID::keep_hierarchy] = AST::AstNode::mkconst_int(node->location, 1, false);
 	else if ((name == "syn_keep" || name == "syn_preserve" || name == "syn_noprune") && numeric && n)
@@ -631,9 +631,11 @@ struct VerilogFrontend : public Frontend {
 
 		for (auto &child : parse_state.current_ast->children) {
 			if (child->type == AST::AST_MODULE)
-				for (auto &attr : attributes)
-					if (child->attributes.count(attr) == 0)
-						child->attributes[attr] = AST::AstNode::mkconst_int(top_loc, 1, false);
+				for (auto &attr : attributes) {
+					IdString attr_id = AST::intern_attr_name(attr);
+					if (child->attributes.count(attr_id) == 0)
+						child->attributes[attr_id] = AST::AstNode::mkconst_int(top_loc, 1, false);
+				}
 		}
 
 		if (flag_nodpi)
@@ -793,7 +795,7 @@ static void parse_file_list(const std::string &file_list_path, RTLIL::Design *de
 {
 	std::ifstream flist(file_list_path);
 	if (!flist.is_open()) {
-		log_error("Verilog file list file does not exist");
+		log_error("Verilog file list file does not exist\n");
 		exit(1);
 	}
 

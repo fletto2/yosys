@@ -375,7 +375,7 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 			SigSpec Q = pm.sigmap(ff->getPort(ID::Q));
 			if (!A.empty())
 				A.replace(Q, D);
-			if (rstport != IdString()) {
+			if (rstport != IdString::Null) {
 				if (ff->type.in(ID($sdff), ID($sdffe))) {
 					SigSpec srst = ff->getPort(ID::SRST);
 					bool rstpol = ff->getParam(ID::SRST_POLARITY).as_bool();
@@ -407,7 +407,7 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 			SigSpec A = cell->getPort(ID::A);
 			f(A, st.ffA2, ID(CEA2), ID(RSTA));
 			if (st.ffA1) {
-				f(A, st.ffA1, ID(CEA1), IdString());
+				f(A, st.ffA1, ID(CEA1), IdString::Null);
 				cell->setParam(ID(AREG), 2);
 				cell->setParam(ID(ACASCREG), 2);
 			}
@@ -422,7 +422,7 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 			SigSpec B = cell->getPort(ID::B);
 			f(B, st.ffB2, ID(CEB2), ID(RSTB));
 			if (st.ffB1) {
-				f(B, st.ffB1, ID(CEB1), IdString());
+				f(B, st.ffB1, ID(CEB1), IdString::Null);
 				cell->setParam(ID(BREG), 2);
 				cell->setParam(ID(BCASCREG), 2);
 			}
@@ -453,31 +453,31 @@ void xilinx_dsp_pack(xilinx_dsp_pm &pm)
 			cell->setParam(ID(PREG), State::S1);
 		}
 
-		log("  clock: %s (%s)", log_signal(st.clock), "posedge");
+		log("  clock: %s (%s)\n", log_signal(st.clock), "posedge");
 
 		if (st.ffA2) {
-			log(" ffA2:%s", st.ffA2);
+			log(" ffA2:%s\n", st.ffA2);
 			if (st.ffA1)
-				log(" ffA1:%s", st.ffA1);
+				log(" ffA1:%s\n", st.ffA1);
 		}
 
 		if (st.ffAD)
-			log(" ffAD:%s", st.ffAD);
+			log(" ffAD:%s\n", st.ffAD);
 
 		if (st.ffB2) {
-			log(" ffB2:%s", st.ffB2);
+			log(" ffB2:%s\n", st.ffB2);
 			if (st.ffB1)
-				log(" ffB1:%s", st.ffB1);
+				log(" ffB1:%s\n", st.ffB1);
 		}
 
 		if (st.ffD)
-			log(" ffD:%s", st.ffD);
+			log(" ffD:%s\n", st.ffD);
 
 		if (st.ffM)
-			log(" ffM:%s", st.ffM);
+			log(" ffM:%s\n", st.ffM);
 
 		if (st.ffP)
-			log(" ffP:%s", st.ffP);
+			log(" ffP:%s\n", st.ffP);
 	}
 	log("\n");
 
@@ -562,7 +562,7 @@ void xilinx_dsp48a_pack(xilinx_dsp48a_pm &pm)
 			SigSpec Q = pm.sigmap(ff->getPort(ID::Q));
 			if (!A.empty())
 				A.replace(Q, D);
-			if (rstport != IdString()) {
+			if (rstport != IdString::Null) {
 				if (ff->type.in(ID($sdff), ID($sdffe))) {
 					SigSpec srst = ff->getPort(ID::SRST);
 					bool rstpol = ff->getParam(ID::SRST_POLARITY).as_bool();
@@ -636,28 +636,29 @@ void xilinx_dsp48a_pack(xilinx_dsp48a_pm &pm)
 			cell->setParam(ID(PREG), State::S1);
 		}
 
-		log("  clock: %s (%s)", log_signal(st.clock), "posedge");
+		std::string message = stringf("  clock: %s (%s)", log_signal(st.clock), "posedge");
 
 		if (st.ffA0)
-			log(" ffA0:%s", st.ffA0);
+			message += stringf(" ffA0:%s", st.ffA0);
 		if (st.ffA1)
-			log(" ffA1:%s", st.ffA1);
+			message += stringf(" ffA1:%s", st.ffA1);
 
 		if (st.ffB0)
-			log(" ffB0:%s", st.ffB0);
+			message += stringf(" ffB0:%s", st.ffB0);
 		if (st.ffB1)
-			log(" ffB1:%s", st.ffB1);
+			message += stringf(" ffB1:%s", st.ffB1);
 
 		if (st.ffD)
-			log(" ffD:%s", st.ffD);
+			message += stringf(" ffD:%s", st.ffD);
 
 		if (st.ffM)
-			log(" ffM:%s", st.ffM);
+			message += stringf(" ffM:%s", st.ffM);
 
 		if (st.ffP)
-			log(" ffP:%s", st.ffP);
+			message += stringf(" ffP:%s", st.ffP);
+
+		log("%s\n", message);
 	}
-	log("\n");
 
 	SigSpec P = st.sigP;
 	if (GetSize(P) < 48)
@@ -685,7 +686,7 @@ void xilinx_dsp_packC(xilinx_dsp_CREG_pm &pm)
 			SigSpec Q = pm.sigmap(ff->getPort(ID::Q));
 			if (!A.empty())
 				A.replace(Q, D);
-			if (rstport != IdString()) {
+			if (rstport != IdString::Null) {
 				if (ff->type.in(ID($sdff), ID($sdffe))) {
 					SigSpec srst = ff->getPort(ID::SRST);
 					bool rstpol = ff->getParam(ID::SRST_POLARITY).as_bool();
@@ -721,11 +722,11 @@ void xilinx_dsp_packC(xilinx_dsp_CREG_pm &pm)
 			cell->setParam(ID(CREG), 1);
 		}
 
-		log("  clock: %s (%s)", log_signal(st.clock), "posedge");
+		std::string message = stringf("  clock: %s (%s)", log_signal(st.clock), "posedge");
 
 		if (st.ffC)
-			log(" ffC:%s", st.ffC);
-		log("\n");
+			message += stringf(" ffC:%s", st.ffC);
+		log("%s\n", message);
 	}
 
 	pm.blacklist(cell);

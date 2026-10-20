@@ -104,7 +104,6 @@ std::set<std::string> yosys_input_files, yosys_output_files;
 bool memhasher_active = false;
 uint32_t memhasher_rng = 123456;
 std::vector<void*> memhasher_store;
-uint32_t Hasher::fudge = 0;
 
 std::string yosys_share_dirname;
 std::string yosys_abc_executable;
@@ -192,10 +191,17 @@ int run_command(const std::string &command, std::function<void(const std::string
 
 	std::string line;
 	char logbuf[128];
-	while (fgets(logbuf, 128, f) != NULL) {
-		line += logbuf;
-		if (!line.empty() && line.back() == '\n')
-			process_line(line), line.clear();
+	while (true) {
+		if (fgets(logbuf, 128, f) != NULL) {
+			line += logbuf;
+			if (!line.empty() && line.back() == '\n')
+				process_line(line), line.clear();
+		} else if (ferror(f) && errno == EINTR) {
+			clearerr(f);
+			continue;
+		} else {
+			break;
+		}
 	}
 	if (!line.empty())
 		process_line(line);
@@ -206,6 +212,8 @@ int run_command(const std::string &command, std::function<void(const std::string
 #ifdef _WIN32
 	return ret;
 #else
+	if (!WIFEXITED(ret))
+		return -1;
 	return WEXITSTATUS(ret);
 #endif
 }
@@ -241,7 +249,7 @@ void yosys_setup()
 	already_setup = true;
 	already_shutdown = false;
 
-	IdString::ensure_prepopulated();
+	StaticTwines::init();
 
 #ifdef YOSYS_ENABLE_PYTHON
 	// Starting Python 3.12, calling PyImport_AppendInittab on an already
@@ -285,7 +293,6 @@ void yosys_shutdown()
 
 	delete yosys_design;
 	yosys_design = NULL;
-	RTLIL::OwningIdString::collect_garbage();
 
 	logger().clear();
 
@@ -332,37 +339,20 @@ const std::string *create_id_prefix(std::string_view file, int line, std::string
 	return new std::string(stringf("$auto$%s:%d:%s$", file, line, func));
 }
 
-RTLIL::IdString new_id_suffix(std::string_view file, int line, std::string_view func, std::string_view suffix)
-{
-#ifdef _WIN32
-	size_t pos = file.find_last_of("/\\");
-#else
-	size_t pos = file.find_last_of('/');
-#endif
-	if (pos != std::string_view::npos)
-		file = file.substr(pos+1);
-
-	pos = func.find_last_of(':');
-	if (pos != std::string_view::npos)
-		func = func.substr(pos+1);
-
-	return stringf("$auto$%s:%d:%s$%s$%d", file, line, func, suffix, autoidx++);
-}
-
 RTLIL::Design *yosys_get_design()
 {
 	return yosys_design;
 }
 
-const char *create_prompt(RTLIL::Design *design, int recursion_counter)
+const char *create_prompt(RTLIL::Design *design, int recursion_counter, bool newline)
 {
 	static char buffer[100];
-	std::string str = "\n";
+	std::string str = newline ? "\n" : "";
 	if (recursion_counter > 1)
 		str += stringf("(%d) ", recursion_counter);
 	str += "yosys";
 	if (!design->selected_active_module.empty())
-		str += stringf(" [%s]", RTLIL::unescape_id(design->selected_active_module));
+		str += stringf(" [%s]", RTLIL::unescape_id(design->twines().str(design->selected_active_module)).c_str());
 	if (!design->full_selection()) {
 		if (design->selected_active_module.empty())
 			str += "*";
@@ -525,6 +515,12 @@ std::string proc_self_dirname()
 	uint32_t buflen = 0;
 	while (_NSGetExecutablePath(path, &buflen) != 0)
 		path = (char *) realloc((void *) path, buflen);
+	char resolved[PATH_MAX];
+	if (realpath(path, resolved) != NULL) {
+		free(path);
+		path = strdup(resolved);
+		buflen = strlen(path);
+	}
 	while (buflen > 0 && path[buflen-1] != '/')
 		buflen--;
 	std::string str(path, buflen);
@@ -576,7 +572,7 @@ std::string proc_self_dirname(void)
 		}
 	}
 	free(path);
-	log_error("Can't determine yosys executable path\n.");
+	log_error("Can't determine yosys executable path.\n");
 	return NULL;
 }
 #else
@@ -774,7 +770,8 @@ bool run_frontend(std::string filename, std::string command, RTLIL::Design *desi
 			from_to_active = run_from.empty();
 		}
 
-		log_comment("\n-- Executing script file `%s' --\n", filename);
+		log("\n");
+		log_comment("-- Executing script file `%s' --\n", filename);
 
 		FILE *f = stdin;
 
@@ -843,10 +840,11 @@ bool run_frontend(std::string filename, std::string command, RTLIL::Design *desi
 		return true;
 	}
 
+	log("\n");
 	if (filename == "-") {
-		log_comment("\n-- Parsing stdin using frontend `%s' --\n", command);
+		log_comment("-- Parsing stdin using frontend `%s' --\n", command);
 	} else {
-		log_comment("\n-- Parsing `%s' using frontend `%s' --\n", filename, command);
+		log_comment("-- Parsing `%s' using frontend `%s' --\n", filename, command);
 	}
 
 	if (command[0] == ' ') {
@@ -865,7 +863,8 @@ void run_pass(std::string command, RTLIL::Design *design)
 	if (design == nullptr)
 		design = yosys_design;
 
-	log_comment("\n-- Running command `%s' --\n", command);
+	log("\n");
+	log_comment("-- Running command `%s' --\n", command);
 
 	Pass::call(design, command);
 }
@@ -903,10 +902,11 @@ void run_backend(std::string filename, std::string command, RTLIL::Design *desig
 	if (filename.empty())
 		filename = "-";
 
+	log("\n");
 	if (filename == "-") {
-		log_comment("\n-- Writing to stdout using backend `%s' --\n", command);
+		log_comment("-- Writing to stdout using backend `%s' --\n", command);
 	} else {
-		log_comment("\n-- Writing to `%s' using backend `%s' --\n", filename, command);
+		log_comment("-- Writing to `%s' using backend `%s' --\n", filename, command);
 	}
 
 	Backend::backend_call(design, NULL, filename, command);
@@ -945,9 +945,11 @@ static char *readline_obj_generator(const char *text, int state)
 
 		if (design->selected_active_module.empty())
 		{
-			for (auto mod : design->modules())
-				if (mod->name.unescape().compare(0, len, text) == 0)
-					obj_names.push_back(strdup(mod->name.unescape().c_str()));
+			for (auto mod : design->modules()) {
+				std::string mod_name = mod->name.unescape();
+				if (mod_name.compare(0, len, text) == 0)
+					obj_names.push_back(strdup(mod_name.c_str()));
+			}
 		}
 		else if (design->module(design->selected_active_module) != nullptr)
 		{
@@ -957,17 +959,21 @@ static char *readline_obj_generator(const char *text, int state)
 				if (w->name.unescape().compare(0, len, text) == 0)
 					obj_names.push_back(strdup(w->name.unescape().c_str()));
 
-			for (auto &it : module->memories)
-				if (it.first.unescape().compare(0, len, text) == 0)
-					obj_names.push_back(strdup(it.first.unescape().c_str()));
+			for (auto &it : module->memories) {
+				std::string mem_name = design->twines().unescaped_str(it.first);
+				if (mem_name.compare(0, len, text) == 0)
+					obj_names.push_back(strdup(mem_name.c_str()));
+			}
 
 			for (auto cell : module->cells())
 				if (cell->name.unescape().compare(0, len, text) == 0)
 					obj_names.push_back(strdup(cell->name.unescape().c_str()));
 
-			for (auto &it : module->processes)
-				if (it.first.unescape().compare(0, len, text) == 0)
-					obj_names.push_back(strdup(it.first.unescape().c_str()));
+			for (auto &it : module->processes) {
+				std::string proc_name = design->twines().unescaped_str(it.first);
+				if (proc_name.compare(0, len, text) == 0)
+					obj_names.push_back(strdup(proc_name.c_str()));
+			}
 		}
 
 		std::sort(obj_names.begin(), obj_names.end());

@@ -71,18 +71,16 @@ struct MemQueryCache
 		// port_ren is an upper bound on when we care about the value fetched
 		// from memory this cycle.
 		int ren = ezSAT::CONST_TRUE;
-		if (ff.has_ce) {
-			ren = qcsat.importSigBit(ff.sig_ce);
-			if (!ff.pol_ce)
-				ren = qcsat.ez->NOT(ren);
-		}
-		if (ff.has_srst) {
-			int nrst = qcsat.importSigBit(ff.sig_srst);
-			if (ff.pol_srst)
-				nrst = qcsat.ez->NOT(nrst);
-			ren = qcsat.ez->AND(ren, nrst);
-		}
+		if (ff.has_ce)
+			ren = import_bit(ff.sig_ce, !ff.pol_ce);
+		if (ff.has_srst)
+			ren = qcsat.ez->AND(ren, import_bit(ff.sig_srst, ff.pol_srst));
 		port_ren = ren;
+	}
+
+	int import_bit(SigBit bit, bool invert) {
+		int res = qcsat.importSigBit(bit);
+		return invert ? qcsat.ez->NOT(res) : res;
 	}
 
 	// Returns ezSAT variable that is true iff the two addresses are the same.
@@ -141,9 +139,7 @@ struct MemQueryCache
 		int aeq = addr_eq(port.addr, wport.addr);
 		int wen_sat = qcsat.importSigBit(wen);
 		int sel_expected = qcsat.ez->AND(aeq, wen_sat);
-		int sel_sat = qcsat.importSigBit(sel);
-		if (neg_sel)
-			sel_sat = qcsat.ez->NOT(sel_sat);
+		int sel_sat = import_bit(sel, neg_sel);
 		qcsat.prepare();
 		bool res = !qcsat.ez->solve(port_ren, qcsat.ez->XOR(sel_expected, sel_sat));
 		cache_is_w2rbyp[key] = res;
@@ -157,9 +153,7 @@ struct MemQueryCache
 		auto it = cache_impossible_with_ren.find(key);
 		if (it != cache_impossible_with_ren.end())
 			return it->second;
-		int sel_sat = qcsat.importSigBit(sel);
-		if (neg_sel)
-			sel_sat = qcsat.ez->NOT(sel_sat);
+		int sel_sat = import_bit(sel, neg_sel);
 		qcsat.prepare();
 		bool res = !qcsat.ez->solve(port_ren, sel_sat);
 		cache_impossible_with_ren[key] = res;
@@ -178,9 +172,7 @@ struct MemQueryCache
 			return false;
 		log_assert(driver.port == ID::Y);
 		SigSpec sig_s = driver.cell->getPort(ID::S);
-		int sel_sat = qcsat.importSigBit(sel);
-		if (neg_sel)
-			sel_sat = qcsat.ez->NOT(sel_sat);
+		int sel_sat = import_bit(sel, neg_sel);
 		bool all_0 = true;
 		int width = driver.cell->parameters.at(ID::WIDTH).as_int();
 		for (int i = 0; i < GetSize(sig_s); i++) {
@@ -214,6 +206,11 @@ struct MemQueryCache
 	}
 };
 
+static bool same_clock(const MemWr &wport, const FfData &ff)
+{
+	return wport.clk_enable && wport.clk == ff.sig_clk && wport.clk_polarity == ff.pol_clk;
+}
+
 struct MemoryDffWorker
 {
 	Module *module;
@@ -223,9 +220,8 @@ struct MemoryDffWorker
 	bool flag_no_rw_check;
 	bool flag_lse;
 
-	MemoryDffWorker(Module *module, bool flag_no_rw_check, bool flag_lse) : module(module), modwalker(module->design), flag_no_rw_check(flag_no_rw_check), flag_lse(flag_lse)
+	MemoryDffWorker(Module *module, bool flag_no_rw_check, bool flag_lse) : module(module), modwalker(module->design, module), flag_no_rw_check(flag_no_rw_check), flag_lse(flag_lse)
 	{
-		modwalker.setup(module);
 		initvals.set(&modwalker.sigmap, module);
 		merger.set(&initvals, module);
 	}
@@ -335,33 +331,33 @@ struct MemoryDffWorker
 	void handle_rd_port(Mem &mem, QuickConeSat &qcsat, int idx)
 	{
 		auto &port = mem.rd_ports[idx];
-		log("Checking read port `%s'[%d] in module `%s': ", mem.memid, idx, module->name);
+		log("Checking read port `%s'[%d] in module `%s':\n", mem.memid, idx, module->name);
 
 		std::vector<MuxData> muxdata;
 		SigSpec data = walk_muxes(port.data, muxdata);
 		FfData ff;
 		pool<std::pair<Cell *, int>> bits;
 		if (!merger.find_output_ff(data, ff, bits)) {
-			log("no output FF found.\n");
+			log("    no output FF found.\n");
 			return;
 		}
 		if (!ff.has_clk) {
-			log("output latches are not supported.\n");
+			log("    output latches are not supported.\n");
 			return;
 		}
 		if (ff.has_aload) {
-			log("output FF has async load, not supported.\n");
+			log("    output FF has async load, not supported.\n");
 			return;
 		}
 		if (ff.has_sr) {
 			// Latches and FFs with SR are not supported.
-			log("output FF has both set and reset, not supported.\n");
+			log("    output FF has both set and reset, not supported.\n");
 			return;
 		}
 		if (flag_lse && ff.has_srst) {
 			// LSE keeps such a register in the fabric and takes the address register
 			// into the RAM instead
-			log("output FF has a sync reset, left for the address FF (LSE).\n");
+			log("    output FF has a sync reset, left for the address FF (LSE).\n");
 			return;
 		}
 
@@ -382,19 +378,11 @@ struct MemoryDffWorker
 		for (int i = 0; i < GetSize(mem.wr_ports); i++) {
 			PortData pd;
 			auto &wport = mem.wr_ports[i];
-			pd.relevant = true;
-			if (!wport.clk_enable)
-				pd.relevant = false;
-			if (wport.clk != ff.sig_clk)
-				pd.relevant = false;
-			if (wport.clk_polarity != ff.pol_clk)
-				pd.relevant = false;
 			// In theory, we *could* support mismatched width
 			// ports here.  However, it's not worth it — wide
 			// ports are recognized *after* memory_dff in
 			// a normal flow.
-			if (wport.wide_log2 != port.wide_log2)
-				pd.relevant = false;
+			pd.relevant = same_clock(wport, ff) && wport.wide_log2 == port.wide_log2;
 			pd.uncollidable_mask.resize(GetSize(port.data));
 			pd.transparency_mask.resize(GetSize(port.data));
 			pd.collision_x_mask.resize(GetSize(port.data));
@@ -453,7 +441,7 @@ struct MemoryDffWorker
 										continue;
 									if (!cache.can_collide_together(pi, k, bitidx))
 										continue;
-									log("FF found, but transparency logic priority doesn't match write priority.\n");
+									log("    FF found, but transparency logic priority doesn't match write priority.\n");
 									return;
 								}
 							}
@@ -461,7 +449,7 @@ struct MemoryDffWorker
 							trans_queue.push_back({pd, bitidx});
 							break;
 						} else {
-							log("FF found, but with a mux data input that doesn't seem to correspond to transparency logic.\n");
+							log("    FF found, but with a mux data input that doesn't seem to correspond to transparency logic.\n");
 							return;
 						}
 					}
@@ -474,7 +462,7 @@ struct MemoryDffWorker
 							continue;
 						if (cache.impossible_with_ren(sbit, md.is_b))
 							continue;
-						log("FF found, but with a mux select that doesn't seem to correspond to transparency logic.\n");
+						log("    FF found, but with a mux select that doesn't seem to correspond to transparency logic.\n");
 						return;
 					}
 				}
@@ -502,7 +490,7 @@ struct MemoryDffWorker
 					non_trans = true;
 			}
 			if (trans && non_trans) {
-				log("FF found, but soft transparency logic is inconsistent for port %d.\n", pi);
+				log("    FF found, but soft transparency logic is inconsistent for port %d.\n", pi);
 				return;
 			}
 			pd.final_transparency = trans;
@@ -510,7 +498,7 @@ struct MemoryDffWorker
 		}
 
 		// OK, it worked.
-		log("merging output FF to cell.\n");
+		log("    merging output FF to cell.\n");
 
 		merger.remove_output_ff(bits);
 		if (ff.has_ce && !ff.pol_ce)
@@ -561,24 +549,24 @@ struct MemoryDffWorker
 	void handle_rd_port_addr(Mem &mem, int idx)
 	{
 		auto &port = mem.rd_ports[idx];
-		log("Checking read port address `%s'[%d] in module `%s': ", mem.memid, idx, module->name);
+		log("Checking read port address `%s'[%d] in module `%s':\n", mem.memid, idx, module->name);
 
 		FfData ff;
 		pool<std::pair<Cell *, int>> bits;
 		if (!merger.find_input_ff(port.addr, ff, bits)) {
-			log("no address FF found.\n");
+			log("    no address FF found.\n");
 			return;
 		}
 		if (!ff.has_clk) {
-			log("address latches are not supported.\n");
+			log("    address latches are not supported.\n");
 			return;
 		}
 		if (ff.has_aload) {
-			log("address FF has async load, not supported.\n");
+			log("    address FF has async load, not supported.\n");
 			return;
 		}
 		if (ff.has_sr || ff.has_arst) {
-			log("address FF has async set and/or reset, not supported.\n");
+			log("    address FF has async set and/or reset, not supported.\n");
 			return;
 		}
 		// Trick part: this transform is invalid if the initial
@@ -586,13 +574,12 @@ struct MemoryDffWorker
 		// cannot simply reject FFs with any defined init bit,
 		// as this is often the result of merging a const bit.
 		if (ff.val_init.is_fully_def() && !flag_lse) {
-			log("address FF has fully-defined init value, not supported.\n");
+			log("    address FF has fully-defined init value, not supported.\n");
 			return;
 		}
-		for (int i = 0; i < GetSize(mem.wr_ports); i++) {
-			auto &wport = mem.wr_ports[i];
-			if (!wport.clk_enable || wport.clk != ff.sig_clk || wport.clk_polarity != ff.pol_clk) {
-				log("address FF clock is not compatible with write clock.\n");
+		for (auto &wport : mem.wr_ports) {
+			if (!same_clock(wport, ff)) {
+				log("    address FF clock is not compatible with write clock.\n");
 				return;
 			}
 		}
@@ -613,12 +600,11 @@ struct MemoryDffWorker
 			port.collision_x_mask[i] = no_rw;
 		}
 		mem.emit();
-		log("merged address FF to cell.\n");
+		log("    merged address FF to cell.\n");
 	}
 
-	void run()
+	void run(std::vector<Mem>& memories)
 	{
-		std::vector<Mem> memories = Mem::get_selected_memories(module);
 		// a memory ice40_lsememlogic keeps in logic: LSE builds it with its registers and
 		// read multiplexers as written, and a merged register would change what a read of
 		// the word being written returns under -no-rw-check
@@ -639,6 +625,15 @@ struct MemoryDffWorker
 		}
 	}
 };
+
+static bool has_async_rd_port(const std::vector<Mem> &memories)
+{
+	for (auto &mem : memories)
+		for (auto &port : mem.rd_ports)
+			if (!port.clk_enable)
+				return true;
+	return false;
+}
 
 struct MemoryDffPass : public Pass {
 	MemoryDffPass() : Pass("memory_dff", "merge input/output DFFs into memory read ports") { }
@@ -683,8 +678,11 @@ struct MemoryDffPass : public Pass {
 		extra_args(args, argidx, design);
 
 		for (auto mod : design->selected_modules()) {
-			MemoryDffWorker worker(mod, flag_no_rw_check, flag_lse);
-			worker.run();
+			std::vector<Mem> memories = Mem::get_selected_memories(mod);
+			if (has_async_rd_port(memories)) {
+				MemoryDffWorker worker(mod, flag_no_rw_check, flag_lse);
+				worker.run(memories);
+			}
 		}
 	}
 } MemoryDffPass;

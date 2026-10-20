@@ -246,7 +246,7 @@ struct Ice40IopackPass : public Pass {
 				"-toutpad $__ICE40_IOPACK_TOUT E:A:P -tinoutpad $__ICE40_IOPACK_TINOUT E:Y:A:P "
 				"-ignore SB_IO PACKAGE_PIN -ignore SB_IO_I3C PACKAGE_PIN -ignore SB_IO_OD PACKAGEPIN "
 				"-ignore SB_RGBA_DRV RGB0 -ignore SB_RGBA_DRV RGB1 -ignore SB_RGBA_DRV RGB2 "
-				"-ignore SB_RGB_DRV RGB0 -ignore SB_RGB_DRV RGB1 -ignore SB_RGB_DRV RGB2 %s", log_id(module)));
+				"-ignore SB_RGB_DRV RGB0 -ignore SB_RGB_DRV RGB1 -ignore SB_RGB_DRV RGB2 %s", module));
 		// LSE makes no pad for an input bit that nothing reads
 		{
 			SigMap sm(module);
@@ -273,7 +273,7 @@ struct Ice40IopackPass : public Pass {
 			if (!unread.empty())
 				log("Removed %d pads of unread inputs.\n", GetSize(unread));
 		}
-		Pass::call(design, stringf("techmap -map +/ice40/iopack_map.v -D IOPACK_PULLUP=1 %s", log_id(module)));
+		Pass::call(design, stringf("techmap -map +/ice40/iopack_map.v -D IOPACK_PULLUP=1 %s", module));
 	}
 } Ice40IopackPass;
 

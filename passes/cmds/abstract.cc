@@ -53,7 +53,7 @@ struct Slice {
 	}
 
 	static void syntax_error(const std::string &slice) {
-		log_cmd_error("Invalid slice '%s', expected '<first>:<last>' or '<single>'", slice);
+		log_cmd_error("Invalid slice '%s', expected '<first>:<last>' or '<single>'\n", slice);
 	}
 
 	std::string to_string() const {
@@ -67,7 +67,7 @@ struct Slice {
 	int wire_offset(RTLIL::Wire *wire, int index) const {
 		int rtl_offset = indices == RtlilSlice ? index : wire->from_hdl_index(index);
 		if (rtl_offset < 0 || rtl_offset >= wire->width) {
-			log_error("Slice %s is out of bounds for wire %s in module %s", to_string(), wire, wire->module);
+			log_error("Slice %s is out of bounds for wire %s in module %s\n", to_string(), wire, wire->module);
 		}
 		return rtl_offset;
 	}
@@ -271,7 +271,7 @@ unsigned int abstract_value(Module* mod, EnableLogic enable, const std::vector<S
 				for (int i = 0; i < conn.second.size(); i++) {
 					if (selected_reps.count(sigmap(conn.second[i]))) {
 						log_debug("Abstracting value for %s.%s[%i] in module %s due to selections:\n",
-							cell, conn.first.unescape(), i, mod);
+							cell, PooledName(cell->module, conn.first).unescape(), i, mod);
 						explain_selections(selected_reps.at(sigmap(conn.second[i])));
 						offsets_to_abstract.insert(i);
 					}
@@ -328,7 +328,7 @@ struct AbstractPass : public Pass {
 		log("during formal verification. The mode and options control when a signal should\n");
 		log("be abstracted and how it should affect FFs present in the design.\n");
 		log("\n");
-		log("Modes:");
+		log("Modes:\n");
 		log("\n");
 		log("    -state\n");
 		log("        The selected FFs will be modified to load a new abstract value on every\n");
@@ -498,7 +498,7 @@ struct AbstractPass : public Pass {
 							log_cmd_error("Enable wire %s not found in module %s\n", enable_name, mod->name);
 						if (GetSize(enable_wire) != 1)
 							log_cmd_error("Enable wire %s must have width 1 but has width %d in module %s\n",
-									enable_name.c_str(), GetSize(enable_wire), mod->name.c_str());
+									enable_name.c_str(), GetSize(enable_wire), mod->name);
 						enable_logic = { enable_wire, enable == Enable::ActiveHigh };
 					} break;
 					case Enable::Initstates: {

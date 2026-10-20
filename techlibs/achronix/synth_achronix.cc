@@ -28,6 +28,19 @@ PRIVATE_NAMESPACE_BEGIN
 struct SynthAchronixPass : public ScriptPass {
   SynthAchronixPass() : ScriptPass("synth_achronix", "synthesis for Achronix Speedster22i FPGAs.") { }
 
+	void on_register() override
+	{
+		target_register.emplace("achronix", Target{
+			"Achronix Speedster22i",
+			{
+				{"", { // default
+					"",
+					{"+/achronix/speedster22i/cells_sim.v"}
+				}}
+			}
+		});
+	}
+
   void help() override
   {
     //   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
@@ -157,7 +170,7 @@ struct SynthAchronixPass : public ScriptPass {
 
     if (check_label("map_cells"))
       {
-        run("iopadmap -bits -outpad $__outpad I:O -inpad $__inpad O:I");
+        run("iopadmap -bits -outpad $__outpad I:O -inpad $__inpad O:I A:top");
         run("techmap -map +/achronix/speedster22i/cells_map.v");
         // VT: not done yet run("dffinit -highlow -ff DFF q power_up");
         run("clean -purge");

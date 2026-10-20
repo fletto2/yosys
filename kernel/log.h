@@ -90,18 +90,34 @@ enum class LogSeverity {
 	Debug,
 	Comment,
 	Info,
+	Highlight,
 	Header,
 	Warning,
+	NonFatalError,
 	Error
 };
 
+struct LogSourceLocation {
+	LogSourceLocation() : filename({}),start_line(-1),start_col(-1),end_line(-1),end_col(-1) { }
+	LogSourceLocation(std::string filename) : filename(filename),start_line(-1),start_col(-1),end_line(-1),end_col(-1) { }
+	LogSourceLocation(std::string filename,int start_line) : filename(filename),start_line(start_line),start_col(-1),end_line(-1),end_col(-1) { }
+	LogSourceLocation(std::string filename,int start_line,int start_col,int end_line,int end_col) :
+		filename(filename),start_line(start_line),start_col(start_col),end_line(end_line),end_col(end_col) { }
+	std::string filename;
+	int start_line;
+	int start_col;
+	int end_line;
+	int end_col;
+};
+
 struct LogMessage {
-	LogMessage(LogSeverity severity, std::string_view prefix, std::string_view format, std::string_view message);
+	LogMessage(LogSeverity severity, LogSourceLocation src, std::string_view prefix, std::string_view format, std::string_view message);
 	LogSeverity severity;
 	std::string prefix;
 	std::string format;
 	std::string message;
 	std::chrono::steady_clock::time_point timestamp;
+	LogSourceLocation src;
 
 	std::string cached_msg;
 };
@@ -218,10 +234,7 @@ public:
 
 	bool empty() { return sinks.empty(); }
 	void clear() { sinks.clear(); }
-	void clear_original()
-	{
-		std::erase_if(sinks, [](const auto &sink) { return dynamic_cast<LogSinkRef *>(sink.get()) != nullptr; });
-	}
+	void clear_original();
 	void flush() { for (auto &sink : sinks) sink->flush(); }
 
 	class Scoped
@@ -394,22 +407,20 @@ public:
 	int get_warnings_total() const { return warnings_count; }
 	int get_errors_total() const { return errors_count; }
 	const std::set<std::string> &get_experimental() const { return experimental; }
-	const std::set<std::string> &get_deprecated() const { return deprecated; }
+	const std::map<std::string, std::string> &get_deprecated() const { return deprecated; }
 	std::chrono::steady_clock::time_point get_initial_time() const;
 
 	void add_hdump(std::string name, std::string value) { hdump[name].insert(value); }
 
-	void formatted_string(LogSeverity severity, std::string_view prefix, std::string_view format, std::string str);
+	void formatted_string(LogSeverity severity, LogSourceLocation src, std::string_view prefix, std::string_view format, std::string str);
 	void formatted_header(RTLIL::Design *design, std::string_view format, std::string str);
-	void formatted_warning(std::string_view prefix, std::string_view format, std::string message);
-	void formatted_file_warning(std::string_view filename, int lineno, std::string_view format, std::string str);
-	void formatted_file_info(std::string_view filename, int lineno, std::string_view format, std::string str);
-	[[noreturn]] void formatted_file_error(std::string_view filename, int lineno, std::string_view format, std::string str);
-	[[noreturn]] void formatted_error(std::string_view format, std::string str);
+	void formatted_warning(LogSourceLocation src, std::string_view prefix, std::string_view format, std::string message);
+	[[noreturn]] void formatted_error(LogSourceLocation src, std::string_view prefix, std::string_view format, std::string message);
+	void formatted_nonfatal_error(LogSourceLocation src, std::string_view prefix, std::string_view format, std::string message);
 	[[noreturn]] void formatted_cmd_error(std::string_view format, std::string message);
 	void suppressed();
 	void add_experimental(const std::string &str);
-	void add_deprecated(const std::string &str);
+	void add_deprecated(const std::string &feature, const std::string &earliest_removal);
 	void spacer();
 	void push();
 	void pop();
@@ -427,8 +438,8 @@ public:
 	std::string finish_hasher();
 
 private:
-	void logv_string(LogSeverity severity, std::string_view prefix, std::string_view format, std::string str_in);
-	[[noreturn]] void error_with_prefix(std::string_view prefix, std::string_view format, std::string message);
+	void logv_string(LogSeverity severity, LogSourceLocation src, std::string_view prefix, std::string_view format, std::string str_in);
+	void error_with_prefix(LogSeverity severity, LogSourceLocation src, std::string_view prefix, std::string_view format, std::string message);
 
 	std::vector<std::unique_ptr<LogSink>> sinks;
 	int verbose_level = 0;
@@ -437,7 +448,8 @@ private:
 	int errors_count = 0;
 	int warnings_count = 0;
 	int warnings_count_noexpect = 0;
-	std::set<std::string> warnings, experimental, experimental_ignored, deprecated;
+	std::set<std::string> warnings, experimental, experimental_ignored;
+	std::map<std::string, std::string> deprecated;
 
 	std::vector<std::regex> warn_regexes, nowarn_regexes, werror_regexes;
 	dict<std::string, LogExpectedItem> expect_log, expect_warning, expect_error;
@@ -458,8 +470,8 @@ LogManager &logger();
 
 extern void (*log_error_atexit)();
 
-void set_verific_logging(void (*cb)(int msg_type, const char *message_id, const char* file_path, unsigned int left_line, unsigned int left_col, unsigned int right_line, unsigned int right_col, const char *msg));
-extern void (*log_verific_callback)(int msg_type, const char *message_id, const char* file_path, unsigned int left_line, unsigned int left_col, unsigned int right_line, unsigned int right_col, const char *msg);
+void set_verific_logging(void (*cb)(int msg_type, const char *message_id, LogSourceLocation src, const char *msg));
+extern void (*log_verific_callback)(int msg_type, const char *message_id, LogSourceLocation src, const char *msg);
 
 #ifndef NDEBUG
 static inline bool ys_debug(int n = 0) { return logger().is_debug(n); }
@@ -470,23 +482,29 @@ static inline bool ys_debug(int = 0) { return false; }
 template <typename... Args>
 inline void log(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_string(LogSeverity::Info, {}, fmt.format_string(), fmt.format(args...));
+	logger().formatted_string(LogSeverity::Info, LogSourceLocation{}, {}, fmt.format_string(), fmt.format(args...));
 }
 
 template <typename... Args>
 inline void log_comment(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_string(LogSeverity::Comment, {}, fmt.format_string(), fmt.format(args...));
+	logger().formatted_string(LogSeverity::Comment, LogSourceLocation{}, {}, fmt.format_string(), fmt.format(args...));
 }
 
 template <typename... Args>
-inline void log_formatted_string(LogSeverity severity, std::string_view prefix,
-		FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+inline void log_highlight(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_string(severity, prefix, fmt.format_string(), fmt.format(args...));
+	logger().formatted_string(LogSeverity::Highlight, LogSourceLocation{}, {}, fmt.format_string(), fmt.format(args...));
 }
 
-#define log_debug(...) do { if (ys_debug(1)) YOSYS_NAMESPACE_PREFIX log_formatted_string(YOSYS_NAMESPACE_PREFIX LogSeverity::Debug, {}, __VA_ARGS__); } while (0)
+template <typename... Args>
+inline void log_formatted_string(LogSeverity severity, LogSourceLocation src, std::string_view prefix,
+		FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	logger().formatted_string(severity, src, prefix, fmt.format_string(), fmt.format(args...));
+}
+
+#define log_debug(...) do { if (ys_debug(1)) YOSYS_NAMESPACE_PREFIX log_formatted_string(YOSYS_NAMESPACE_PREFIX LogSeverity::Debug, {}, {}, __VA_ARGS__); } while (0)
 
 template <typename... Args>
 inline void log_header(RTLIL::Design *design, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
@@ -497,13 +515,13 @@ inline void log_header(RTLIL::Design *design, FmtString<TypeIdentity<Args>...> f
 template <typename... Args>
 inline void log_warning(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_warning("Warning: ", fmt.format_string(), fmt.format(args...));
+	logger().formatted_warning(LogSourceLocation{}, "Warning: ", fmt.format_string(), fmt.format(args...));
 }
 
 template <typename... Args>
 inline void log_warning_noprefix(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_warning({}, fmt.format_string(), fmt.format(args...));
+	logger().formatted_warning(LogSourceLocation{}, {}, fmt.format_string(), fmt.format(args...));
 }
 
 inline void log_experimental(const std::string &str)
@@ -511,34 +529,40 @@ inline void log_experimental(const std::string &str)
 	logger().add_experimental(str);
 }
 
-inline void log_deprecated(const std::string &str)
+inline void log_deprecated(const std::string &feature, const std::string &earliest_removal = "")
 {
-	logger().add_deprecated(str);
+	logger().add_deprecated(feature, earliest_removal);
 }
 
 // Log with filename to report a problem in a source file.
 template <typename... Args>
-void log_file_warning(std::string_view filename, int lineno, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+void log_file_warning(LogSourceLocation src, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_file_warning(filename, lineno, fmt.format_string(), fmt.format(args...));
+	logger().formatted_warning(src, "Warning: ", fmt.format_string(), fmt.format(args...));
 }
 
 template <typename... Args>
-void log_file_info(std::string_view filename, int lineno, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+void log_file_info(LogSourceLocation src, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_file_info(filename, lineno, fmt.format_string(), fmt.format(args...));
+	logger().formatted_string(LogSeverity::Info, src, "NOTE: ", fmt.format_string(), fmt.format(args...));
 }
 
 template <typename... Args>
 [[noreturn]] void log_error(FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_error(fmt.format_string(), fmt.format(args...));
+	logger().formatted_error(LogSourceLocation{}, "ERROR: ", fmt.format_string(), fmt.format(args...));
 }
 
 template <typename... Args>
-[[noreturn]] void log_file_error(std::string_view filename, int lineno, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+[[noreturn]] void log_file_error(LogSourceLocation src, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
 {
-	logger().formatted_file_error(filename, lineno, fmt.format_string(), fmt.format(args...));
+	logger().formatted_error(src, "ERROR: ", fmt.format_string(), fmt.format(args...));
+}
+
+template <typename... Args>
+void log_file_nonfatal_error(LogSourceLocation src, FmtString<TypeIdentity<Args>...> fmt, const Args &... args)
+{
+	logger().formatted_nonfatal_error(src, "ERROR: ", fmt.format_string(), fmt.format(args...));
 }
 
 template <typename... Args>
@@ -564,28 +588,10 @@ void log_backtrace(const char *prefix, int levels);
 
 std::string log_signal(const RTLIL::SigSpec &sig, bool autoint = true);
 std::string log_const(const RTLIL::Const &value, bool autoint = true);
-const char *log_id(const RTLIL::IdString &id);
-
-template<typename T> static inline const char *log_id(T *obj, const char *nullstr = nullptr) {
-	if (nullstr && obj == nullptr)
-		return nullstr;
-	return log_id(obj->name);
-}
 
 void log_module(RTLIL::Module *module, std::string indent = "");
 void log_cell(RTLIL::Cell *cell, std::string indent = "");
 void log_wire(RTLIL::Wire *wire, std::string indent = "");
-
-[[noreturn]]
-void log_assert_failure(const char *expr, const char *file, int line);
-#ifndef NDEBUG
-static inline void log_assert_worker(bool cond, const char *expr, const char *file, int line) {
-	if (!cond) log_assert_failure(expr, file, line);
-}
-#  define log_assert(_assert_expr_) YOSYS_NAMESPACE_PREFIX log_assert_worker(_assert_expr_, #_assert_expr_, __FILE__, __LINE__)
-#else
-#  define log_assert(_assert_expr_) do { if (0) { (void)(_assert_expr_); } } while(0)
-#endif
 
 [[noreturn]]
 void log_abort_internal(const char *file, int line);
@@ -687,7 +693,7 @@ static inline void log_dump_val_worker(const char *v) { log("%s", v); }
 static inline void log_dump_val_worker(std::string v) { log("%s", v); }
 static inline void log_dump_val_worker(PerformanceTimer p) { log("%f seconds", p.sec()); }
 static inline void log_dump_args_worker(const char *p) { log_assert(*p == 0); }
-void log_dump_val_worker(RTLIL::IdString v);
+void log_dump_val_worker(IdString v);
 void log_dump_val_worker(RTLIL::SigSpec v);
 void log_dump_val_worker(RTLIL::State v);
 

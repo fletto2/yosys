@@ -284,7 +284,7 @@ struct OptMergeThreadWorker
 				// mem can have an excessively large parameter holding the init data
 				continue;
 			}
-			if (cell->type == ID($scopeinfo))
+			if (cell->type.in(ID($scopeinfo), ID($barrier)))
 				continue;
 			// two tristate drivers with the same inputs may drive different pads, each
 			// needs its own enable
@@ -463,7 +463,7 @@ struct OptMergeWorker
 				for (auto &it : remove_cell->connections()) {
 					if (remove_cell->output(it.first)) {
 						RTLIL::SigSpec keep_sig = keep_cell->getPort(it.first);
-						log_debug("    Redirecting output %s: %s = %s\n", it.first,
+						log_debug("    Redirecting output %s: %s = %s\n", module->twines().str(it.first),
 								log_signal(it.second), log_signal(keep_sig));
 						Const init = initvals(keep_sig);
 						initvals.remove_init(it.second);

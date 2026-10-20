@@ -59,7 +59,7 @@ struct SmvWorker
 	{
 		if (!idcache.count(id))
 		{
-			string name = stringf("_%s", id);
+			string name = "_" + module->twines().str(id);
 
 			if (name.compare(0, 2, "_\\") == 0)
 				name = "_" + name.substr(2);
@@ -308,16 +308,16 @@ struct SmvWorker
 				continue;
 			}
 
-			if (cell->type.in(ID($not), ID($pos), ID($neg)))
+			if (cell->type.in(ID($not), ID($pos), ID($neg), ID($barrier)))
 			{
 				int width = GetSize(cell->getPort(ID::Y));
 				string expr_a, op;
 
 				if (cell->type == ID($not))  op = "!";
-				if (cell->type == ID($pos))  op = "";
+				if (cell->type.in(ID($pos), ID($barrier)))  op = "";
 				if (cell->type == ID($neg))  op = "-";
 
-				if (cell->getParam(ID::A_SIGNED).as_bool())
+				if (cell->hasParam(ID::A_SIGNED) && cell->getParam(ID::A_SIGNED).as_bool())
 				{
 					definitions.push_back(stringf("%s := unsigned(%s%s);", lvalue(cell->getPort(ID::Y)),
 							op.c_str(), rvalue_s(cell->getPort(ID::A), width)));
@@ -576,7 +576,7 @@ struct SmvWorker
 			if (cell->type == ID($scopeinfo))
 				continue;
 
-			if (cell->type[0] == '$') {
+			if (!cell->type.isPublic()) {
 				if (cell->type.in(ID($dffe), ID($sdff), ID($sdffe), ID($sdffce)) || cell->type.str().substr(0, 6) == "$_SDFF" || (cell->type.str().substr(0, 6) == "$_DFFE" && cell->type.str().size() == 10)) {
 					log_error("Unsupported cell type %s for cell %s.%s -- please run `dffunmap` before `write_smv`.\n",
 							cell->type.unescape(), module, cell);
@@ -807,7 +807,7 @@ struct SmvBackend : public Backend {
 						continue;
 					}
 
-					log_error("Unknown template statement: '%s'", line.c_str() + indent);
+					log_error("Unknown template statement: '%s'\n", line.c_str() + indent);
 				}
 
 				*f << line << std::endl;

@@ -29,6 +29,25 @@ PRIVATE_NAMESPACE_BEGIN
 struct SynthIntelALMPass : public ScriptPass {
 	SynthIntelALMPass() : ScriptPass("synth_intel_alm", "synthesis for ALM-based Intel (Altera) FPGAs.") {}
 
+	void on_register() override
+	{
+		target_register.emplace("intel_alm", Target{
+			"Intel (Altera) ALM-based",
+			{
+				{"cyclonev", {
+					"Cyclone V",
+					{ "+/intel_alm/cyclonev/cells_sim.v",
+					  "+/intel_alm/common/alm_sim.v",
+					  "+/intel_alm/common/dff_sim.v",
+					  "+/intel_alm/common/dsp_sim.v",
+					  "+/intel_alm/common/mem_sim.v",
+					  "+/intel_alm/common/misc_sim.v",
+					}
+				}}
+			}
+		});
+	}
+
 	void help() override
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
@@ -183,7 +202,7 @@ struct SynthIntelALMPass : public ScriptPass {
 		}
 
 		if (check_label("coarse")) {
-			run("proc");
+			run("proc -latches error");
 			if (flatten || help_mode) {
 				run("check");
 				run("flatten", "(skip if -noflatten)");
@@ -191,8 +210,8 @@ struct SynthIntelALMPass : public ScriptPass {
 			run("tribuf -logic");
 			run("deminout");
 			run("opt_expr");
-			run("opt_clean");
 			run("check");
+			run("opt_clean");
 			run("opt -nodffe -nosdff");
 			run("fsm");
 			run("opt");
@@ -241,6 +260,7 @@ struct SynthIntelALMPass : public ScriptPass {
 		}
 
 		if (check_label("map_ffs")) {
+			run("check -latchonly -assert");
 			run("techmap");
 			run("dfflegalize -cell $_DFFE_PN0P_ 0 -cell $_SDFFCE_PP0P_ 0");
 			run("techmap -map +/intel_alm/common/dff_map.v");

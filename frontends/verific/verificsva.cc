@@ -19,7 +19,7 @@
 
 
 // Currently supported SVA sequence and property syntax:
-// http://symbiyosys.readthedocs.io/en/latest/verific.html
+// https://yosyshq.readthedocs.io/projects/sby/en/latest/verific.html
 //
 // Next gen property syntax:
 //   basic_property
@@ -1745,7 +1745,7 @@ struct VerificSvaImporter
 			}
 		}
 
-		RTLIL::IdString root_name = module->uniquify(importer->mode_names || is_user_declared ? RTLIL::escape_id(root->Name()) : NEW_ID);
+		RTLIL::IdString root_name = module->uniquify(importer->mode_names || is_user_declared ? module->twines().add(RTLIL::escape_id(root->Name())) : module->twines().add(NEW_ID));
 
 		try
 		{

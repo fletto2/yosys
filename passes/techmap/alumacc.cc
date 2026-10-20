@@ -28,6 +28,7 @@ struct AlumaccWorker
 {
 	RTLIL::Module *module;
 	SigMap sigmap;
+	bool macc_only;
 
 	struct maccnode_t {
 		Macc macc;
@@ -147,7 +148,7 @@ struct AlumaccWorker
 	dict<RTLIL::SigSig, pool<alunode_t*>> sig_alu;
 	int macc_counter, alu_counter;
 
-	AlumaccWorker(RTLIL::Module *module) : module(module), sigmap(module)
+	AlumaccWorker(RTLIL::Module *module, bool macc_only) : module(module), sigmap(module), macc_only(macc_only)
 	{
 		macc_counter = 0;
 		alu_counter = 0;
@@ -158,6 +159,12 @@ struct AlumaccWorker
 		for (auto port : module->ports)
 			for (auto bit : sigmap(module->wire(port)))
 				bit_users[bit]++;
+
+		// merging through a kept wire would leave the old cell alive next to the $macc
+		for (auto wire : module->wires())
+			if (wire->get_bool_attribute(ID::keep))
+				for (auto bit : sigmap(wire))
+					bit_users[bit]++;
 
 		for (auto cell : module->cells())
 		for (auto &conn : cell->connections())
@@ -277,7 +284,7 @@ struct AlumaccWorker
 
 					auto other_n = sig_macc.at(port.in_a);
 
-					if (other_n->users > 1)
+					if (other_n->users > 1 || other_n->cell->has_keep_attr())
 						continue;
 
 					if (GetSize(other_n->y) != GetSize(n->y) && macc_may_overflow(other_n->macc, GetSize(other_n->y), port.is_signed))
@@ -285,15 +292,14 @@ struct AlumaccWorker
 
 					log("  merging $macc model for %s into %s.\n", other_n->cell, n->cell);
 
-					bool do_subtract = port.do_subtract;
-					for (int j = 0; j < GetSize(other_n->macc.terms); j++) {
-						if (do_subtract)
-							other_n->macc.terms[j].do_subtract = !other_n->macc.terms[j].do_subtract;
-						if (j == 0)
-							n->macc.terms[i--] = other_n->macc.terms[j];
-						else
-							n->macc.terms.push_back(other_n->macc.terms[j]);
-					}
+					auto &terms = n->macc.terms;
+					auto &other_terms = other_n->macc.terms;
+					if (port.do_subtract)
+						for (auto &term : other_terms)
+							term.do_subtract = !term.do_subtract;
+					terms.erase(terms.begin() + i);
+					terms.insert(terms.begin() + i, other_terms.begin(), other_terms.end());
+					i--;
 
 					delete_nodes.insert(other_n);
 				}
@@ -306,6 +312,28 @@ struct AlumaccWorker
 				sig_macc.erase(n->y);
 				delete n;
 			}
+		}
+	}
+
+	void drop_plain_macc()
+	{
+		pool<maccnode_t*> delete_nodes;
+
+		for (auto &it : sig_macc)
+		{
+			auto n = it.second;
+			bool has_product = false;
+
+			for (auto &term : n->macc.terms)
+				if (GetSize(term.in_b) > 0)
+					has_product = true;
+			if (!has_product || GetSize(n->macc.terms) < 2 || n->cell->has_keep_attr())
+				delete_nodes.insert(n);
+		}
+
+		for (auto n : delete_nodes) {
+			sig_macc.erase(n->y);
+			delete n;
 		}
 	}
 
@@ -447,7 +475,7 @@ struct AlumaccWorker
 
 		for (auto cell : lge_cells)
 		{
-			log("  creating $alu model for %s (%s):", cell, cell->type.unescape());
+			std::string message = stringf("  creating $alu model for %s (%s):", cell, cell->type.unescape());
 
 			bool cmp_less = cell->type.in(ID($lt), ID($le));
 			bool cmp_equal = cell->type.in(ID($le), ID($ge));
@@ -485,10 +513,11 @@ struct AlumaccWorker
 				n->invert_b = true;
 				n->oversized = false;
 				sig_alu[RTLIL::SigSig(A, B)].insert(n);
-				log(" new $alu\n");
+				message += " new $alu";
 			} else {
-				log(" merged with %s.\n", n->cells.front());
+				message += stringf(" merged with %s.", n->cells.front());
 			}
+			log("%s\n", message);
 
 			n->cells.push_back(cell);
 			n->cmp.push_back(std::make_tuple(cmp_less, !cmp_less, cmp_equal, false, is_signed, Y));
@@ -530,6 +559,7 @@ struct AlumaccWorker
 	void replace_alu()
 	{
 		std::string src("");
+		std::string message;
 		for (auto &it1 : sig_alu)
 		for (auto n : it1.second)
 		{
@@ -537,10 +567,10 @@ struct AlumaccWorker
 			{
 				n->alu_cell = module->addPos(NEW_ID, n->a, n->y, n->is_signed);
 
-				log("  creating $pos cell for ");
+				message = "  creating $pos cell for ";
 				for (int i = 0; i < GetSize(n->cells); i++)
-					log("%s%s", i ? ", ": "", n->cells[i]);
-				log(": %s\n", n->alu_cell);
+					message += stringf("%s%s", i ? ", ": "", n->cells[i]);
+				log("%s: %s\n", message, n->alu_cell);
 
 				goto delete_node;
 			}
@@ -548,10 +578,10 @@ struct AlumaccWorker
 			n->alu_cell = module->addCell(NEW_ID, ID($alu));
 			alu_counter++;
 
-			log("  creating $alu cell for ");
+			message = "  creating $alu cell for ";
 			for (int i = 0; i < GetSize(n->cells); i++)
-				log("%s%s", i ? ", ": "", n->cells[i]);
-			log(": %s\n", n->alu_cell);
+				message += stringf("%s%s", i ? ", ": "", n->cells[i]);
+			log("%s: %s\n", message, n->alu_cell);
 
 			if (n->cells.size() > 0)
 				n->alu_cell->set_src_attribute(n->cells[0]->get_src_attribute());
@@ -603,10 +633,16 @@ struct AlumaccWorker
 		count_bit_users();
 		extract_macc();
 		merge_macc();
-		macc_to_alu();
-		replace_macc();
-		extract_cmp_alu();
-		replace_alu();
+
+		if (macc_only) {
+			drop_plain_macc();
+			replace_macc();
+		} else {
+			macc_to_alu();
+			replace_macc();
+			extract_cmp_alu();
+			replace_alu();
+		}
 
 		log("  created %d $alu and %d $macc cells.\n", alu_counter, macc_counter);
 	}
@@ -618,29 +654,35 @@ struct AlumaccPass : public Pass {
 	{
 		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
 		log("\n");
-		log("    alumacc [selection]\n");
+		log("    alumacc [options] [selection]\n");
 		log("\n");
 		log("This pass translates arithmetic operations like $add, $mul, $lt, etc. to $alu\n");
 		log("and $macc cells.\n");
+		log("\n");
+		log("    -macc-only\n");
+		log("        only create $macc cells for sums that contain a product, leave all\n");
+		log("        other cells untouched.\n");
 		log("\n");
 	}
 	void execute(std::vector<std::string> args, RTLIL::Design *design) override
 	{
 		log_header(design, "Executing ALUMACC pass (create $alu and $macc cells).\n");
 
+		bool macc_only = false;
+
 		size_t argidx;
 		for (argidx = 1; argidx < args.size(); argidx++) {
-			// if (args[argidx] == "-foobar") {
-			// 	foobar_mode = true;
-			// 	continue;
-			// }
+			if (args[argidx] == "-macc-only") {
+				macc_only = true;
+				continue;
+			}
 			break;
 		}
 		extra_args(args, argidx, design);
 
 		for (auto mod : design->selected_modules())
 			if (!mod->has_processes_warn()) {
-				AlumaccWorker worker(mod);
+				AlumaccWorker worker(mod, macc_only);
 				worker.run();
 			}
 	}

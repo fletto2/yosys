@@ -93,7 +93,7 @@ void microchip_dsp_pack(microchip_dsp_pm &pm)
 
 			if (!A.empty())
 				A.replace(Q, D);
-			if (rstport != IdString()) {
+			if (rstport != IdString::Null) {
 				if (ff->type.in(ID($sdff), ID($sdffe))) {
 					SigSpec srst = ff->getPort(ID::SRST);
 					bool rstpol_n = !ff->getParam(ID::SRST_POLARITY).as_bool();
@@ -171,13 +171,13 @@ void microchip_dsp_pack(microchip_dsp_pm &pm)
 		log("  clock: %s (%s)\n", log_signal(st.clock), "posedge");
 
 		if (st.ffA)
-			log(" \t ffA:%s\n", st.ffA);
+			log("  ffA:%s\n", st.ffA);
 		if (st.ffB)
-			log(" \t ffB:%s\n", st.ffB);
+			log("  ffB:%s\n", st.ffB);
 		if (st.ffD)
-			log(" \t ffD:%s\n", st.ffD);
+			log("  ffD:%s\n", st.ffD);
 		if (st.ffP)
-			log(" \t ffP:%s\n", st.ffP);
+			log("  ffP:%s\n", st.ffP);
 	}
 	log("\n");
 
@@ -209,7 +209,7 @@ void microchip_dsp_packC(microchip_dsp_CREG_pm &pm)
 			SigSpec Q = pm.sigmap(ff->getPort(ID::Q));
 			if (!A.empty())
 				A.replace(Q, D);
-			if (rstport != IdString()) {
+			if (rstport != IdString::Null) {
 				if (ff->type.in(ID($sdff), ID($sdffe))) {
 					SigSpec srst = ff->getPort(ID::SRST);
 					bool rstpol_n = !ff->getParam(ID::SRST_POLARITY).as_bool();
@@ -261,10 +261,10 @@ void microchip_dsp_packC(microchip_dsp_CREG_pm &pm)
 			cell->setPort(ID::C, C);
 		}
 
-		log("  clock: %s (%s)", log_signal(st.clock), "posedge");
+		log("  clock: %s (%s)\n", log_signal(st.clock), "posedge");
 
 		if (st.ffC)
-			log(" ffC:%s", st.ffC);
+			log(" ffC:%s\n", st.ffC);
 		log("\n");
 	}
 

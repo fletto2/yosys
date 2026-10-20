@@ -41,6 +41,7 @@ Pass *current_pass;
 std::map<std::string, Frontend*> frontend_register;
 std::map<std::string, Pass*> pass_register;
 std::map<std::string, Backend*> backend_register;
+std::map<std::string, Target> target_register;
 
 std::vector<std::string> Frontend::next_args;
 
@@ -58,7 +59,8 @@ void try_collect_garbage()
 	if (!GarbageCollectionGuard::is_enabled() || !garbage_collection_requested)
 		return;
 	garbage_collection_requested = false;
-	RTLIL::OwningIdString::collect_garbage();
+	if (yosys_design)
+		yosys_design->gc_twines();
 }
 
 Pass::Pass(std::string name, std::string short_help, source_location location) :
@@ -125,7 +127,6 @@ Pass::pre_post_exec_state_t Pass::pre_execute()
 
 void Pass::post_execute(Pass::pre_post_exec_state_t state)
 {
-	IdString::checkpoint();
 	log_suppressed();
 
 	int64_t time_ns = PerformanceTimer::query() - state.begin_ns;
@@ -165,10 +166,10 @@ void Pass::cmd_log_args(const std::vector<std::string> &args)
 {
 	if (args.size() <= 1)
 		return;
-	log("Full command line:");
+	std::string message = "Full command line:";
 	for (size_t i = 0; i < args.size(); i++)
-		log(" %s", args[i]);
-	log("\n");
+		message += stringf(" %s", args[i]);
+	log("%s\n", message);
 }
 
 void Pass::cmd_error(const std::vector<std::string> &args, size_t argidx, std::string msg)
@@ -182,7 +183,8 @@ void Pass::cmd_error(const std::vector<std::string> &args, size_t argidx, std::s
 		command_text = command_text + (command_text.empty() ? "" : " ") + args[i];
 	}
 
-	log("\nSyntax error in command `%s':\n", command_text);
+	log("\n");
+	log("Syntax error in command `%s':\n", command_text);
 	help();
 
 	log_cmd_error("Command syntax error: %s\n> %s\n> %*s^\n",
@@ -279,10 +281,11 @@ void Pass::call(RTLIL::Design *design, std::vector<std::string> args)
 		return;
 
 	if (echo_mode) {
-		log("%s", create_prompt(design, 0));
+		std::string message = stringf("%s", create_prompt(design, 0, false));
 		for (size_t i = 0; i < args.size(); i++)
-			log("%s%s", i ? " " : "", args[i]);
+			message += stringf("%s%s", i ? " " : "", args[i]);
 		log("\n");
+		log("%s\n", message);
 	}
 
 	if (pass_register.count(args[0]) == 0)
@@ -306,7 +309,7 @@ void Pass::call(RTLIL::Design *design, std::vector<std::string> args)
 
 void Pass::call_on_selection(RTLIL::Design *design, const RTLIL::Selection &selection, std::string command)
 {
-	std::string backup_selected_active_module = design->selected_active_module;
+	IdString backup_selected_active_module = design->selected_active_module;
 	design->selected_active_module.clear();
 	design->push_selection(selection);
 
@@ -318,7 +321,7 @@ void Pass::call_on_selection(RTLIL::Design *design, const RTLIL::Selection &sele
 
 void Pass::call_on_selection(RTLIL::Design *design, const RTLIL::Selection &selection, std::vector<std::string> args)
 {
-	std::string backup_selected_active_module = design->selected_active_module;
+	IdString backup_selected_active_module = design->selected_active_module;
 	design->selected_active_module.clear();
 	design->push_selection(selection);
 
@@ -330,8 +333,8 @@ void Pass::call_on_selection(RTLIL::Design *design, const RTLIL::Selection &sele
 
 void Pass::call_on_module(RTLIL::Design *design, RTLIL::Module *module, std::string command)
 {
-	std::string backup_selected_active_module = design->selected_active_module;
-	design->selected_active_module = module->name.str();
+	IdString backup_selected_active_module = design->selected_active_module;
+	design->selected_active_module = module->name;
 	design->push_empty_selection();
 	design->select(module);
 
@@ -343,8 +346,8 @@ void Pass::call_on_module(RTLIL::Design *design, RTLIL::Module *module, std::str
 
 void Pass::call_on_module(RTLIL::Design *design, RTLIL::Module *module, std::vector<std::string> args)
 {
-	std::string backup_selected_active_module = design->selected_active_module;
-	design->selected_active_module = module->name.str();
+	IdString backup_selected_active_module = design->selected_active_module;
+	design->selected_active_module = module->name;
 	design->push_empty_selection();
 	design->select(module);
 
@@ -485,8 +488,7 @@ void Frontend::extra_args(std::istream *&f, std::string &filename, std::vector<s
 			if (filename.size() <= 2)
 				log_error("Missing EOT marker in here document!\n");
 			std::string eot_marker = filename.substr(2);
-			if (Frontend::current_script_file == nullptr)
-				filename = "<stdin>";
+			filename = (Frontend::current_script_file == nullptr) ?  "<stdin>" : "<inlined>";
 			last_here_document.clear();
 			while (1) {
 				std::string buffer;
@@ -999,7 +1001,7 @@ struct HelpPass : public Pass {
 		for (auto it : StaticCellTypes::builder.cells) {
 			if (!StaticCellTypes::categories.is_known(it.type))
 				continue;
-			auto name = it.type.str();
+			auto name = ID::str(it.type);
 			if (cell_help_messages.contains(name)) {
 				auto cell_help = cell_help_messages.get(name);
 				groups[cell_help.group].emplace_back(name);
@@ -1037,10 +1039,10 @@ struct HelpPass : public Pass {
 			json.name("code"); json.value(ch.code);
 			vector<string> inputs, outputs;
 			for (auto &input : ct.inputs)
-				inputs.push_back(input.str());
+				inputs.push_back(ID::str(input));
 			json.name("inputs"); json.value(inputs);
 			for (auto &output : ct.outputs)
-				outputs.push_back(output.str());
+				outputs.push_back(ID::str(output));
 			json.name("outputs"); json.value(outputs);
 			vector<string> properties;
 			// CellType properties
@@ -1079,11 +1081,13 @@ struct HelpPass : public Pass {
 		if (args.size() == 2) {
 			if (args[1] == "-all") {
 				for (auto &it : pass_register) {
-					log("\n\n");
-					log("%s  --  %s\n", it.first, it.second->short_help);
-					for (size_t i = 0; i < it.first.size() + it.second->short_help.size() + 6; i++)
-						log("=");
 					log("\n");
+					log("\n");
+					log("%s  --  %s\n", it.first, it.second->short_help);
+					std::string msg;
+					for (size_t i = 0; i < it.first.size() + it.second->short_help.size() + 6; i++)
+						msg += '=';
+					log("%s\n", msg);
 					it.second->help();
 					log_warning_flags(it.second);
 				}
@@ -1109,7 +1113,9 @@ struct HelpPass : public Pass {
 						log("\n");
 						log("%s\n", help_cell.code);
 				} else {
-					log("\n    %s %s\n\n", help_cell.name, help_cell.ports);
+					log("\n");
+					log("    %s %s\n", help_cell.name, help_cell.ports);
+					log("\n");
 					if (help_cell.ver == "2" || help_cell.ver == "2a") {
 						if (help_cell.title != "") log("%s:\n", help_cell.title);
 						std::stringstream ss;
@@ -1122,7 +1128,8 @@ struct HelpPass : public Pass {
 					} else {
 						log("No help message for this cell type found.\n");
 					}
-					log("\nRun 'help %s+' to display the Verilog model for this cell type.\n", args[1]);
+					log("\n");
+					log("Run 'help %s+' to display the Verilog model for this cell type.\n", args[1]);
 					log("\n");
 				}
 			}

@@ -4,12 +4,14 @@ begin:
     hierarchy -check [-top <top> | -auto-top]
 
 coarse:
+    optbarriers    (if -barriers)
     proc [-ifx]
-    flatten    (if -flatten)
+    check
+    flatten [-barriers]    (if -flatten)
     future
     opt_expr -keepdc
-    opt_clean
     check
+    opt_clean
     opt -noff -keepdc
     wreduce -keepdc [-memx]
     memory_dff    (if -rdff)
