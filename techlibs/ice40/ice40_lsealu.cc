@@ -1107,10 +1107,66 @@ struct Ice40LseCmpPass : public Pass {
 					}
 				return false;
 			};
+			// x op K with K at or past the end of x's range is a constant or x == K:
+			// y_s >= 2047 on a signed 12-bit y_s is y_s == 2047 (video_modulator), which
+			// LSE builds as an AND, not a carry chain
+			int count_edge = 0;
+			auto edge = [&](Cell *cell) {
+				bool is_signed = cell->getParam(ID::A_SIGNED).as_bool() && cell->getParam(ID::B_SIGNED).as_bool();
+				SigSpec a = sigmap(cell->getPort(ID::A)), b = sigmap(cell->getPort(ID::B));
+				IdString type = cell->type;
+				if (a.is_fully_const() == b.is_fully_const())
+					return false;
+				if (a.is_fully_const()) {
+					std::swap(a, b);
+					type = type == ID($lt) ? ID($gt) : type == ID($le) ? ID($ge) : type == ID($gt) ? ID($lt) : ID($le);
+				}
+				int n = GetSize(a);
+				if (n > 62 || GetSize(b) > 62)
+					return false;
+				int64_t lo = is_signed ? -(int64_t(1) << (n - 1)) : 0;
+				int64_t hi = is_signed ? (int64_t(1) << (n - 1)) - 1 : (int64_t(1) << n) - 1;
+				int64_t k = 0;
+				for (int i = 0; i < GetSize(b); i++)
+					if (b[i] == State::S1)
+						k |= int64_t(1) << i;
+				if (is_signed && b[GetSize(b) - 1] == State::S1)
+					k -= int64_t(1) << GetSize(b);
+				// x > k is x >= k + 1, x < k is x <= k - 1
+				if (type == ID($gt)) { type = ID($ge); k++; }
+				if (type == ID($lt)) { type = ID($le); k--; }
+				int result = -1;
+				int64_t eqk = 0;
+				if (type == ID($ge)) {
+					if (k <= lo) result = 1;
+					else if (k > hi) result = 0;
+					else if (k == hi) eqk = hi;
+					else return false;
+				} else {
+					if (k >= hi) result = 1;
+					else if (k < lo) result = 0;
+					else if (k == lo) eqk = lo;
+					else return false;
+				}
+				log("  %s: %s %s %lld is %s.\n", log_id(cell), log_signal(a), log_id(type), (long long)k,
+						result < 0 ? "an equality" : result ? "always true" : "always false");
+				SigSpec y = cell->getPort(ID::Y);
+				if (result >= 0) {
+					SigSpec ry(result ? State::S1 : State::S0);
+					ry.extend_u0(GetSize(y));
+					module->connect(y, ry);
+				} else
+					module->addEq(NEW_ID, a, RTLIL::Const(eqk, n), y, false);
+				module->remove(cell);
+				count_edge++;
+				return true;
+			};
 			int count = 0;
 			for (auto cell : todo) {
 				bool is_signed = cell->getParam(ID::A_SIGNED).as_bool() && cell->getParam(ID::B_SIGNED).as_bool();
 				bool eq = cell->type.in(ID($eq), ID($ne));
+				if (!eq && edge(cell))
+					continue;
 				if (is_signed && !eq)
 					continue;
 				// x < {h, 2'b00} is x[hi] < h, and {h, 2'b00} <= x is h <= x[hi]: LSE drops
@@ -1188,7 +1244,7 @@ struct Ice40LseCmpPass : public Pass {
 				module->remove(cell);
 				count++;
 			}
-			log("%s: %d comparisons built as %d LUTs.\n", log_id(module), count, count_luts);
+			log("%s: %d comparisons built as %d LUTs, %d at the end of their range.\n", log_id(module), count, count_luts, count_edge);
 		}
 	}
 } Ice40LseCmpPass;
