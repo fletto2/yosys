@@ -19,6 +19,7 @@
 #include "kernel/sigtools.h"
 #include "kernel/ff.h"
 #include "kernel/ffinit.h"
+#include "kernel/consteval.h"
 #include <functional>
 
 USING_YOSYS_NAMESPACE
@@ -1161,10 +1162,69 @@ struct Ice40LseCmpPass : public Pass {
 				count_edge++;
 				return true;
 			};
+			// an operand that is always 2^k - 1 (a small table of sizes, e.g. 7/15/31/63)
+			// is a mask: x <= m is !|(x & ~m), m < x is |(x & ~m); LUTs, no chain
+			// (sprite_renderer: ydiff <= sprite_height_pixels)
+			auto is_mask = [&](const SigSpec &sig) {
+				pool<SigBit> vars;
+				pool<Cell*> seen;
+				for (auto bit : sig)
+					support(bit, vars, seen);
+				if (GetSize(vars) > 2 || sig.is_fully_const())
+					return false;
+				std::vector<SigBit> v(vars.begin(), vars.end());
+				for (int i = 0; i < (1 << GetSize(v)); i++) {
+					ConstEval ce(module);
+					for (int j = 0; j < GetSize(v); j++)
+						ce.set(v[j], (i >> j) & 1 ? State::S1 : State::S0);
+					SigSpec val = sig;
+					if (!ce.eval(val) || !val.is_fully_def())
+						return false;
+					int n = 0;
+					while (n < GetSize(val) && val[n] == State::S1)
+						n++;
+					for (int j = n; j < GetSize(val); j++)
+						if (val[j] != State::S0)
+							return false;
+				}
+				return true;
+			};
+			int count_mask = 0;
 			int count = 0;
 			for (auto cell : todo) {
 				bool is_signed = cell->getParam(ID::A_SIGNED).as_bool() && cell->getParam(ID::B_SIGNED).as_bool();
 				bool eq = cell->type.in(ID($eq), ID($ne));
+				if (!eq && !is_signed) {
+					SigSpec x = sigmap(cell->getPort(ID::A)), m = sigmap(cell->getPort(ID::B));
+					bool le = cell->type.in(ID($le), ID($ge));
+					if (cell->type.in(ID($gt), ID($ge)))
+						std::swap(x, m);
+					// now x < m or x <= m
+					bool ok = false, inv = false;
+					if (le && is_mask(m))
+						ok = true;
+					else if (!le && is_mask(x)) {
+						std::swap(x, m);
+						ok = inv = true;
+					}
+					if (ok) {
+						int w = std::max(GetSize(x), GetSize(m));
+						x.extend_u0(w);
+						m.extend_u0(w);
+						SigSpec over = module->And(NEW_ID, x, module->Not(NEW_ID, m));
+						SigBit r = module->ReduceOr(NEW_ID, over).as_bit();
+						if (!inv)
+							r = module->Not(NEW_ID, r).as_bit();
+						SigSpec y = cell->getPort(ID::Y);
+						SigSpec ry(r);
+						ry.extend_u0(GetSize(y));
+						module->connect(y, ry);
+						log("  %s: %s against the mask %s.\n", log_id(cell), log_signal(x), log_signal(m));
+						module->remove(cell);
+						count_mask++;
+						continue;
+					}
+				}
 				if (!eq && edge(cell))
 					continue;
 				if (is_signed && !eq)
@@ -1244,7 +1304,7 @@ struct Ice40LseCmpPass : public Pass {
 				module->remove(cell);
 				count++;
 			}
-			log("%s: %d comparisons built as %d LUTs, %d at the end of their range.\n", log_id(module), count, count_luts, count_edge);
+			log("%s: %d comparisons built as %d LUTs, %d at the end of their range, %d against a mask.\n", log_id(module), count, count_luts, count_edge, count_mask);
 		}
 	}
 } Ice40LseCmpPass;
