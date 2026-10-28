@@ -309,6 +309,68 @@ struct AlumaccWorker
 		}
 	}
 
+	// Two unsigned terms of the same sign whose non-zero bits don't overlap add up
+	// to their bitwise OR, so they become one term with no adder: 64*r + 8*r + 4*r
+	// is {r,r,00} + 8*r, and -a - b is -(a|b). LSE does this; it saves a carry
+	// chain per merge.
+	void merge_disjoint()
+	{
+		pool<maccnode_t*> delete_nodes;
+
+		auto plain = [](const Macc::term_t &t) {
+			return GetSize(t.in_b) == 0 && !t.is_signed;
+		};
+		auto bit = [](const Macc::term_t &t, int i) {
+			return i < GetSize(t.in_a) ? t.in_a[i] : RTLIL::SigBit(State::S0);
+		};
+
+		for (auto &it : sig_macc)
+		{
+			auto n = it.second;
+			int width = GetSize(n->y);
+
+			bool merged = true;
+			while (merged) {
+				merged = false;
+				for (int i = 0; i < GetSize(n->macc.terms) && !merged; i++)
+				for (int j = i + 1; j < GetSize(n->macc.terms) && !merged; j++) {
+					auto &a = n->macc.terms[i], &b = n->macc.terms[j];
+					if (!plain(a) || !plain(b) || a.do_subtract != b.do_subtract)
+						continue;
+					int len = min(width, max(GetSize(a.in_a), GetSize(b.in_a)));
+					bool disjoint = true;
+					for (int k = 0; k < len && disjoint; k++)
+						disjoint = bit(a, k) == State::S0 || bit(b, k) == State::S0;
+					if (!disjoint)
+						continue;
+					RTLIL::SigSpec sig;
+					for (int k = 0; k < len; k++)
+						sig.append(bit(a, k) == State::S0 ? bit(b, k) : bit(a, k));
+					log("  merging disjoint terms %s and %s of %s.\n", log_signal(a.in_a), log_signal(b.in_a), n->cell);
+					a.in_a = sig;
+					n->macc.terms.erase(n->macc.terms.begin() + j);
+					merged = true;
+				}
+			}
+
+			// what is left of a sum of disjoint terms is a wire
+			if (GetSize(n->macc.terms) == 1 && plain(n->macc.terms[0]) && !n->macc.terms[0].do_subtract) {
+				RTLIL::SigSpec a = n->macc.terms[0].in_a;
+				a.extend_u0(width);
+				a = a.extract(0, width);
+				log("  replacing $macc model for %s by its single term %s.\n", n->cell, log_signal(a));
+				module->connect(n->y, a);
+				module->remove(n->cell);
+				delete_nodes.insert(n);
+			}
+		}
+
+		for (auto n : delete_nodes) {
+			sig_macc.erase(n->y);
+			delete n;
+		}
+	}
+
 	void macc_to_alu()
 	{
 		pool<maccnode_t*> delete_nodes;
@@ -603,6 +665,7 @@ struct AlumaccWorker
 		count_bit_users();
 		extract_macc();
 		merge_macc();
+		merge_disjoint();
 		macc_to_alu();
 		replace_macc();
 		extract_cmp_alu();
