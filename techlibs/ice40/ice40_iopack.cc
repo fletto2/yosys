@@ -112,7 +112,13 @@ struct Ice40IopackPass : public Pass {
 			auto it = driver.find(clk);
 			if (it != driver.end() && it->second.first->type == ID(SB_LUT4) && it->second.second == ID::O) {
 				Cell *src = it->second.first;
-				SigSpec in = {src->getPort(ID(I0)), src->getPort(ID(I1)), src->getPort(ID(I2)), src->getPort(ID(I3))};
+				// an unconnected pin is an empty port: keep its place, or the inputs
+				// shift down and no longer match LUT_INIT
+				SigSpec in;
+				for (auto pin : {ID(I0), ID(I1), ID(I2), ID(I3)}) {
+					SigSpec s = src->hasPort(pin) ? src->getPort(pin) : SigSpec();
+					in.append(GetSize(s) == 1 ? s : SigSpec(State::S0));
+				}
 				inv = lut(in, ~src->getParam(ID(LUT_INIT)).as_int() & 0xffff);
 			} else
 				inv = lut(clk, 0x0001);
