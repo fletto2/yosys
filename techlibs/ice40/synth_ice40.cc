@@ -325,6 +325,9 @@ struct SynthIce40Pass : public ScriptPass
 			run("peepopt");
 			run("opt_clean");
 			run("share");
+			// s ? a + x : a + y is a + (s ? x : y): one adder, as LSE builds it (adders
+			// only: compares were split over their multiplexer on purpose, ice40_lsemuxcmp)
+			run("opt_share t:$add t:$sub t:$alu t:$mux t:$pmux");
 			run("ice40_lsecmp");
 			run("techmap -map +/cmp2lut.v -D LUT_WIDTH=4");
 			run("opt_expr");
