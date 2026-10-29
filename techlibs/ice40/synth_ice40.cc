@@ -439,7 +439,7 @@ struct SynthIce40Pass : public ScriptPass
 				// a kept net (syn_keep) stays a LUT output; mfs recovers area with don't
 				// cares as LSE does (5160 -> 5102 LCs on VERA, fmax up)
 				run("ice40_lsecut -insert a:keep", "(unless -noabc)");
-				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs,-W,4,-M,5000;mfs2", "(unless -noabc)");
+				run("abc -lut 4 -script +strash;dch,-f;if,-K,4,-F,0,-A,0;mfs,-W,4,-M,5000;mfs2;lutpack,-N,4,-S,1", "(unless -noabc)");
 				run("ice40_lsecut -remove", "           (unless -noabc)");
 			}
 			run("ice40_wrapcarry -unwrap");
