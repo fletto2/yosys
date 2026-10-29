@@ -460,8 +460,7 @@ struct SynthIce40Pass : public ScriptPass
 		if (check_label("polarity")) {
 			run("ice40_lsemuxsel");
 			run("ice40_lsepolarity");
-			// ice40_lsechain left out: its unread top carries and pass-through
-			// halves cost LCs without shortening any path
+			run("ice40_lsechain");
 		}
 
 		if (check_label("map_iopads"))
