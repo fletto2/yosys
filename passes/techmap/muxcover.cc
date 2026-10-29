@@ -113,7 +113,7 @@ struct MuxcoverWorker
 
 		for (auto cell : module->cells()) {
 			for (auto conn : cell->connections()) {
-				if (!cell->input(conn.first))
+				if (cell->known() && !cell->input(conn.first))
 					continue;
 				for (auto bit : sigmap(conn.second)) {
 					if (used_once.count(bit) || cell->type != ID($_MUX_) || conn.first == ID::S)

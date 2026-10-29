@@ -1,0 +1,13 @@
+# A mux output read by a cell of unknown type must keep its driver.
+read_verilog <<EOT
+module top(input a, b, c, d, s, t, output y);
+  wire m = s ? b : a;
+  assign y = t ? m : (s ? d : c);
+  \$__unknown_cell box (.I(m));
+endmodule
+EOT
+proc
+simplemap
+muxcover -mux4=150
+check -assert
+select -assert-count 1 t:$_MUX_
