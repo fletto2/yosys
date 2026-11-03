@@ -134,15 +134,24 @@ struct Ice40RadiantPass : public Pass {
 					conn("POWEROFF", port("PWROFF_N"));
 				} else if (t == ID(PLL_B)) {
 					bool two = !port("OUTCOREB").empty() || !port("OUTGLOBALB").empty();
-					make(two ? "SB_PLL40_2F_CORE" : "SB_PLL40_CORE");
-					conn("REFERENCECLK", port("REFERENCECLK")); conn("EXTFEEDBACK", port("FEEDBACK"));
+					// a reference straight from a top-level pin must use the PLL's own pad, the
+					// pad's input buffer and the core reference share one IO site
+					SigSpec ref = port("REFERENCECLK");
+					bool pad = ref.is_wire() && ref.as_wire()->port_input;
+					make(pad ? (two ? "SB_PLL40_2_PAD" : "SB_PLL40_PAD") : (two ? "SB_PLL40_2F_CORE" : "SB_PLL40_CORE"));
+					conn(pad ? "PACKAGEPIN" : "REFERENCECLK", ref);
+					// Radiant wants FEEDBACK looped from INTFBOUT even for internal feedback; SB_PLL40 has no
+					// such port and feeds back by itself
+					if (port("FEEDBACK") != port("INTFBOUT"))
+						conn("EXTFEEDBACK", port("FEEDBACK"));
 					conn("DYNAMICDELAY", bus("DYNAMICDELAY", 8)); conn("BYPASS", port("BYPASS"));
 					conn("RESETB", port("RESET_N")); conn("SCLK", port("SCLK")); conn("SDI", port("SDI"));
 					conn("LATCHINPUTVALUE", port("LATCH")); conn("SDO", port("SDO")); conn("LOCK", port("LOCK"));
 					if (two) {
 						conn("PLLOUTCOREA", port("OUTCORE")); conn("PLLOUTGLOBALA", port("OUTGLOBAL"));
 						conn("PLLOUTCOREB", port("OUTCOREB")); conn("PLLOUTGLOBALB", port("OUTGLOBALB"));
-						n->setParam(ID(PLLOUT_SELECT_PORTA), param("PLLOUT_SELECT_PORTA", "SHIFTREG_0deg"));
+						if (!pad)	// the 2-output pad PLL's port A is always GENCLK
+							n->setParam(ID(PLLOUT_SELECT_PORTA), param("PLLOUT_SELECT_PORTA", "SHIFTREG_0deg"));
 						n->setParam(ID(PLLOUT_SELECT_PORTB), param("PLLOUT_SELECT_PORTB", "SHIFTREG_0deg"));
 						n->setParam(ID(ENABLE_ICEGATE_PORTA), value(param("ENABLE_ICEGATE_PORTA", "0"), 1));
 						n->setParam(ID(ENABLE_ICEGATE_PORTB), value(param("ENABLE_ICEGATE_PORTB", "0"), 1));
