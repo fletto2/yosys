@@ -66,12 +66,17 @@ void create_ice40_dsp(ice40_dsp_pm &pm)
 		return;
 	}
 
-	// A user-instantiated SB_MAC16 that already uses its adder/accumulator (or 8x8
-	// mode) must keep its configuration: only grow plain 16x16 multipliers.
+	// A user-instantiated SB_MAC16 that already uses its adder/accumulator, 8x8 mode
+	// or any of its internal registers must keep its configuration (the rebuild below
+	// only sets the registers it matched in the fabric): only grow plain 16x16 multipliers.
 	if (st.mul->type == ID(SB_MAC16)) {
 		bool plain = st.mul->getParam(ID(TOPOUTPUT_SELECT)).as_int() == 3 &&
 				st.mul->getParam(ID(BOTOUTPUT_SELECT)).as_int() == 3 &&
 				!st.mul->getParam(ID(MODE_8x8)).as_bool();
+		for (auto param : {ID(A_REG), ID(B_REG), ID(C_REG), ID(D_REG), ID(TOP_8x8_MULT_REG),
+				ID(BOT_8x8_MULT_REG), ID(PIPELINE_16x16_MULT_REG1), ID(PIPELINE_16x16_MULT_REG2)})
+			if (st.mul->hasParam(param) && st.mul->getParam(param).as_bool())
+				plain = false;
 		for (auto port : {ID(OLOADTOP), ID(OLOADBOT), ID(OHOLDTOP), ID(OHOLDBOT), ID(ADDSUBTOP),
 				ID(ADDSUBBOT), ID(ORSTTOP), ID(ORSTBOT), ID(CI), ID(ACCUMCI)})
 			if (st.mul->hasPort(port)) {
