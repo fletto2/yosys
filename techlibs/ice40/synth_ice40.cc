@@ -445,6 +445,8 @@ struct SynthIce40Pass : public ScriptPass
 			run("ice40_wrapcarry -unwrap");
 			run("techmap -map +/ice40/ff_map.v");
 			run("clean");
+			// LSE builds compares on the critical path shallower than its ripple chains
+			run("ice40_lsecmpdepth");
 			// no opt_lut: LSE never merges other logic into a carry LC's LUT
 		}
 

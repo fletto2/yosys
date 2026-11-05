@@ -996,9 +996,16 @@ struct Ice40LseCmpPass : public Pass {
 			c->setPort(pins[k], k < n ? SigSpec(in[k]) : SigSpec(State::S0));
 		c->setPort(ID::O, y);
 		c->set_bool_attribute(ID(lse_fixed));
+		if (tag_idx >= 0) {
+			// a magnitude ripple: ice40_lsecmpdepth may rebuild it if it ends up on the critical path
+			c->set_string_attribute(ID(lse_cmp), tag);
+			c->set_string_attribute(ID(lse_cmp_idx), std::to_string(tag_idx++));
+		}
 		count_luts++;
 		return y;
 	}
+	std::string tag;
+	int tag_idx = -1;
 
 	SigBit equality(SigSpec a, SigSpec b, bool ne)
 	{
@@ -1036,6 +1043,8 @@ struct Ice40LseCmpPass : public Pass {
 			return (or_equal ? module->Le(NEW_ID, a, b) : module->Lt(NEW_ID, a, b)).as_bit();
 		int n = GetSize(a);
 		bool init = or_equal;
+		tag = stringf("%s%s", log_id(NEW_ID), or_equal ? "le" : "lt");
+		tag_idx = 0;
 		SigBit c = lut({b[0], b[1], a[1], a[0]}, [init](const std::vector<bool> &v) {
 			bool b0 = v[0], b1 = v[1], a1 = v[2], a0 = v[3];
 			bool l0 = (!a0 && b0) || (a0 == b0 && init);
@@ -1045,6 +1054,7 @@ struct Ice40LseCmpPass : public Pass {
 			c = lut({c, b[i], a[i]}, [](const std::vector<bool> &v) {
 				return (!v[2] && v[1]) || (v[2] == v[1] && v[0]);
 			});
+		tag_idx = -1;
 		return c;
 	}
 
@@ -1308,6 +1318,226 @@ struct Ice40LseCmpPass : public Pass {
 		}
 	}
 } Ice40LseCmpPass;
+
+struct Ice40LseCmpDepthPass : public Pass {
+	Ice40LseCmpDepthPass() : Pass("ice40_lsecmpdepth", "iCE40: rebuild LSE ripple compares that limit the logic depth") { }
+	void help() override
+	{
+		//   |---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|---v---|
+		log("\n");
+		log("    ice40_lsecmpdepth [selection]\n");
+		log("\n");
+		log("Times the mapped netlist with unit delays (a LUT and its routing 1, a carry step\n");
+		log("0.1) and rebuilds the magnitude ripple chains of ice40_lsecmp that lie on the\n");
+		log("deepest path as two-level lookahead compares, repeating while the deepest path\n");
+		log("gets shorter. Compares off that path keep the LSE structure.\n");
+		log("\n");
+	}
+
+	Module *module;
+	SigMap sigmap;
+	int count_luts;
+
+	SigBit lut(std::vector<SigBit> in, std::function<bool(const std::vector<bool>&)> f, SigBit y = SigBit())
+	{
+		int n = GetSize(in);
+		Const init(State::S0, 16);
+		for (int i = 0; i < 16; i++) {
+			std::vector<bool> v;
+			for (int k = 0; k < n; k++)
+				v.push_back((i >> k) & 1);
+			init.set(i, f(v) ? State::S1 : State::S0);
+		}
+		if (y.wire == nullptr)
+			y = module->addWire(NEW_ID);
+		Cell *c = module->addCell(NEW_ID, ID(SB_LUT4));
+		c->setParam(ID(LUT_INIT), init);
+		IdString pins[4] = {ID(I0), ID(I1), ID(I2), ID(I3)};
+		for (int k = 0; k < 4; k++)
+			c->setPort(pins[k], k < n ? SigSpec(in[k]) : SigSpec(State::S0));
+		c->setPort(ID::O, y);
+		count_luts++;
+		return y;
+	}
+
+	// a < b (a <= b with init) over bits l..r as (lt, eq); eq only when asked for
+	std::pair<SigBit, SigBit> node(const SigSpec &a, const SigSpec &b, bool init, int l, int r, bool need_eq, SigBit y)
+	{
+		int groups = (r - l + 2) / 2;
+		if (groups == 1) {
+			SigBit g, e;
+			if (r == l) {
+				g = lut({a[l], b[l]}, [](const std::vector<bool> &v) { return !v[0] && v[1]; }, y);
+				if (need_eq)
+					e = lut({a[l], b[l]}, [](const std::vector<bool> &v) { return v[0] == v[1]; });
+			} else {
+				bool ini = l == 0 && init;
+				g = lut({b[l], b[l+1], a[l+1], a[l]}, [ini](const std::vector<bool> &v) {
+					bool b0 = v[0], b1 = v[1], a1 = v[2], a0 = v[3];
+					bool l0 = (!a0 && b0) || (a0 == b0 && ini);
+					return (!a1 && b1) || (a1 == b1 && l0);
+				}, y);
+				if (need_eq)
+					e = lut({a[l], a[l+1], b[l], b[l+1]}, [](const std::vector<bool> &v) {
+						return v[0] == v[2] && v[1] == v[3];
+					});
+			}
+			return std::make_pair(g, e);
+		}
+		int m = l + 2 * ((groups + 1) / 2) - 1;   // low half takes the extra group
+		auto lo = node(a, b, init, l, m, need_eq, SigBit());
+		auto hi = node(a, b, init, m + 1, r, true, SigBit());
+		SigBit g = lut({hi.first, hi.second, lo.first}, [](const std::vector<bool> &v) {
+			return v[0] || (v[1] && v[2]);
+		}, y);
+		SigBit e;
+		if (need_eq)
+			e = lut({hi.second, lo.second}, [](const std::vector<bool> &v) { return v[0] && v[1]; });
+		return std::make_pair(g, e);
+	}
+
+	void execute(std::vector<std::string> args, RTLIL::Design *design) override
+	{
+		size_t argidx = 1;
+		extra_args(args, argidx, design);
+		log_header(design, "Executing ICE40_LSECMPDEPTH pass.\n");
+
+		for (auto m : design->selected_modules()) {
+			module = m;
+			count_luts = 0;
+			int rebuilt = 0, rounds = 0, first_depth = -1, depth = -1;
+			while (rounds++ < 50) {
+				sigmap.set(module);
+				dict<SigBit, Cell*> driver;
+				dict<SigBit, int> fanout;
+				for (auto cell : module->cells())
+					for (auto &conn : cell->connections()) {
+						if (cell->output(conn.first)) {
+							for (auto bit : sigmap(conn.second))
+								driver[bit] = cell;
+						} else {
+							for (auto bit : sigmap(conn.second))
+								fanout[bit]++;
+						}
+					}
+				for (auto wire : module->wires())
+					if (wire->port_output)
+						for (auto bit : sigmap(SigSpec(wire)))
+							fanout[bit]++;
+
+				auto comb = [](Cell *c) { return c->type.in(ID(SB_LUT4), ID(SB_CARRY), ID($lut)); };
+				auto delay = [](Cell *c, IdString port) {
+					if (c->type != ID(SB_CARRY)) return 10;
+					return port == ID(CI) ? 1 : 2;
+				};
+				// arrival times
+				dict<SigBit, int> arr;
+				std::function<int(SigBit)> arrival = [&](SigBit bit) -> int {
+					bit = sigmap(bit);
+					if (!bit.wire) return 0;
+					auto it = arr.find(bit);
+					if (it != arr.end()) return it->second;
+					arr[bit] = 0;
+					int t = 0;
+					if (driver.count(bit) && comb(driver.at(bit))) {
+						Cell *c = driver.at(bit);
+						for (auto &conn : c->connections())
+							if (c->input(conn.first))
+								for (auto b : conn.second)
+									t = std::max(t, arrival(b) + delay(c, conn.first));
+					}
+					arr[bit] = t;
+					return t;
+				};
+				// endpoints: inputs of sequential cells and RAM/DSP, module outputs
+				pool<SigBit> ends;
+				for (auto cell : module->cells())
+					if (!comb(cell))
+						for (auto &conn : cell->connections())
+							if (cell->input(conn.first))
+								for (auto bit : sigmap(conn.second))
+									if (bit.wire) ends.insert(bit);
+				for (auto wire : module->wires())
+					if (wire->port_output)
+						for (auto bit : sigmap(SigSpec(wire)))
+							if (bit.wire) ends.insert(bit);
+				int dmax = 0;
+				for (auto bit : ends)
+					dmax = std::max(dmax, arrival(bit));
+				if (first_depth < 0) first_depth = dmax;
+				if (depth >= 0 && dmax >= depth)
+					log_warning("%s: rebuilding did not shorten the deepest path.\n", log_id(module));
+				depth = dmax;
+				// critical bits: walk back from the deepest endpoints along the arcs with zero slack
+				pool<SigBit> crit;
+				std::function<void(SigBit)> mark = [&](SigBit bit) {
+					bit = sigmap(bit);
+					if (!bit.wire || crit.count(bit)) return;
+					crit.insert(bit);
+					if (!driver.count(bit) || !comb(driver.at(bit))) return;
+					Cell *c = driver.at(bit);
+					int t = arrival(bit);
+					for (auto &conn : c->connections())
+						if (c->input(conn.first))
+							for (auto b : conn.second)
+								if (b.wire && arrival(b) + delay(c, conn.first) == t)
+									mark(b);
+				};
+				for (auto bit : ends)
+					if (arrival(bit) == dmax)
+						mark(bit);
+
+				// the tagged chains that carry a critical bit
+				dict<std::string, std::vector<std::pair<int, Cell*>>> chains;
+				for (auto cell : module->cells())
+					if (cell->type == ID(SB_LUT4) && cell->has_attribute(ID(lse_cmp)))
+						chains[cell->get_string_attribute(ID(lse_cmp))].push_back(
+								std::make_pair(atoi(cell->get_string_attribute(ID(lse_cmp_idx)).c_str()), cell));
+				int done = 0;
+				for (auto &it : chains) {
+					auto &cells = it.second;
+					std::sort(cells.begin(), cells.end(), [](const std::pair<int, Cell*> &x, const std::pair<int, Cell*> &y) {
+						return x.first < y.first;
+					});
+					bool hit = false, ok = GetSize(cells) >= 3;
+					for (int k = 0; ok && k < GetSize(cells); k++) {
+						Cell *c = cells[k].second;
+						if (cells[k].first != k) ok = false;
+						SigBit o = sigmap(c->getPort(ID::O));
+						if (crit.count(o)) hit = true;
+						if (k > 0) {
+							SigBit prev = sigmap(cells[k-1].second->getPort(ID::O));
+							if (sigmap(c->getPort(ID(I0))) != SigSpec(prev) || fanout[prev] != 1)
+								ok = false;
+						}
+					}
+					if (!ok || !hit)
+						continue;
+					bool init = it.first.size() >= 2 && it.first.substr(it.first.size() - 2) == "le";
+					SigSpec a, b;
+					Cell *c0 = cells[0].second;
+					a.append(c0->getPort(ID(I3))); a.append(c0->getPort(ID(I2)));
+					b.append(c0->getPort(ID(I0))); b.append(c0->getPort(ID(I1)));
+					for (int k = 1; k < GetSize(cells); k++) {
+						b.append(cells[k].second->getPort(ID(I1)));
+						a.append(cells[k].second->getPort(ID(I2)));
+					}
+					SigBit y = cells.back().second->getPort(ID::O);
+					for (auto &kc : cells)
+						module->remove(kc.second);
+					node(a, b, init, 0, GetSize(a) - 1, false, y);
+					done++;
+				}
+				if (done == 0)
+					break;
+				rebuilt += done;
+			}
+			if (rebuilt)
+				log("%s: rebuilt %d ripple compares as lookahead (%d LUTs), deepest path %.1f -> %.1f.\n",
+						log_id(module), rebuilt, count_luts, first_depth / 10.0, depth / 10.0);
+		}
+	}
+} Ice40LseCmpDepthPass;
 
 struct Ice40LseMuxChainPass : public Pass {
 	Ice40LseMuxChainPass() : Pass("ice40_lsemuxchain", "build priority mux chains as 4:1 muxes, as Lattice LSE does") { }
